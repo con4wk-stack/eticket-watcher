@@ -8,6 +8,14 @@ const LINE_USER_ID = "Uaa7df44a6257eecb60409c763c087be5";
 const INTERVAL = 30000; // 30秒
 // ===================
 
+// Render用ダミーサーバー（常駐維持用）
+const app = express();
+const PORT = process.env.PORT || 3000;
+app.get("/", (req, res) => res.send("Watcher running"));
+app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
+
+console.log("Watcher started:", new Date().toISOString());
+
 // ボタンごとの状態管理
 let lastStates = {};
 
