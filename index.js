@@ -41,6 +41,9 @@ async function checkPage() {
 
     const html = await res.text();
 
+    //テスト用記述
+    html = html.replace(/class="button button--default uk-button-\d+"/g, 'class="button button--primary"');
+
     // 日付・時間取得（最初の要素だけ）
     const dateMatch = html.match(/class="block-ticket-article__date">([^<]+)</);
     const timeMatch = html.match(/class="block-ticket-article__time">([^<]+)</);
