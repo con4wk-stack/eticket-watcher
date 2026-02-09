@@ -39,7 +39,7 @@ async function checkPage() {
       return;
     }
 
-    const html = await res.text();
+    let html = await res.text();
 
     //テスト用記述
     html = html.replace(/class="button button--default uk-button-\d+"/g, 'class="button button--primary"');
