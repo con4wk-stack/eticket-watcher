@@ -8,14 +8,6 @@ const LINE_USER_ID = "Uaa7df44a6257eecb60409c763c087be5";
 const INTERVAL = 30000; // 30秒
 // ===================
 
-// Render用ダミーサーバー
-const app = express();
-const PORT = process.env.PORT || 3000;
-app.get("/", (req, res) => res.send("Watcher running"));
-app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
-
-console.log("Watcher started:", new Date().toISOString());
-
 // ボタンごとの状態管理
 let lastStates = {};
 
@@ -25,7 +17,7 @@ function extractHref(onclick) {
   return match ? match[1] : null;
 }
 
-// ページチェック関数
+// ページチェック関数（最新版）
 async function checkPage() {
   try {
     const controller = new AbortController();
@@ -41,16 +33,25 @@ async function checkPage() {
 
     const html = await res.text();
 
-    // 日付・時間取得（最初の要素だけ）
+    // 日付取得（最初の要素だけ）
     const dateMatch = html.match(/class="block-ticket-article__date">([^<]+)</);
-    const timeMatch = html.match(/class="block-ticket-article__time">([^<]+)</);
     const ticketDate = dateMatch ? dateMatch[1].trim() : "不明";
-    const ticketTime = timeMatch ? timeMatch[1].trim() : "不明";
 
-    // 発売前ボタンの正規表現
-    const preButtons = [...html.matchAll(/class="button button--default uk-button-\d+" onclick="([^"]+)"/g)];
+    // 時間取得（最初の要素だけ）
+    const timeMatch = html.match(/class="block-ticket-article__time">([\s\S]*?)</);
+    let ticketTimeRaw = timeMatch ? timeMatch[1] : "不明";
 
-    // 発売後ボタンの正規表現
+    // ticketTime を整形（改行・空白除去、見やすく）
+    const ticketTime = ticketTimeRaw
+      .split(/\r?\n/)           // 改行で分割
+      .map(line => line.trim())  // 前後空白削除
+      .filter(line => line)      // 空行を削除
+      .join('\n');               // 改行で再結合
+
+    // 発売前ボタン（uk-button-数字は無視）
+    const preButtons = [...html.matchAll(/class="button button--default" onclick="([^"]+)"/g)];
+
+    // 発売後ボタン
     const releasedButtons = [...html.matchAll(/class="button button--primary"/g)];
 
     // 発売前ボタンごとに状態確認
@@ -61,13 +62,19 @@ async function checkPage() {
 
       if (!lastStates[id]) lastStates[id] = false;
 
-      // 発売前から発売に切り替わったか
-      const isReleased = releasedButtons.length > 0;
+      const isReleased = releasedButtons.length > 0; // 1つでも発売後ボタンがあれば発売開始
+
       if (isReleased && !lastStates[id]) {
+        // 発売前 → 発売 に切り替わった
         lastStates[id] = true;
 
-        // 通知メッセージ
-        const message = `🎉 e+チケット発売開始！\n日付: ${ticketDate} ${ticketTime}\nリンク: ${href}\n一覧ページ: ${url}`;
+        // LINE通知メッセージ作成
+        const message = `🎉 e+チケット発売開始！
+日付: ${ticketDate}
+${ticketTime}
+リンク: ${href}
+
+一覧ページ: ${url}`;
 
         // LINE通知
         if (LINE_TOKEN && LINE_USER_ID) {
@@ -81,13 +88,15 @@ async function checkPage() {
               to: LINE_USER_ID,
               messages: [{ type: "text", text: message }],
             }),
-          }).then(() => console.log("LINE通知送信:", href))
+          })
+            .then(() => console.log("LINE通知送信:", href))
             .catch(err => console.log("LINE通知エラー:", err.message));
         } else {
           console.log("LINE_TOKEN または LINE_USER_ID が未設定");
         }
+
       } else if (!isReleased && lastStates[id]) {
-        // 再度発売前に戻った場合も状態更新
+        // 発売前に戻った場合も状態更新（念のため）
         lastStates[id] = false;
       }
     });
