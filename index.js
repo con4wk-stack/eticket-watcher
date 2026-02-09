@@ -56,7 +56,7 @@ async function checkPage() {
       // 複数チケット対応（まとめ通知）
       const dateMatches = [...html.matchAll(/class="block-ticket-article__date">([^<]+)</g)];
       const timeMatches = [...html.matchAll(/class="block-ticket-article__time">([^<]+)</g)];
-      const buttonMatches = [...html.matchAll(/class="button"[^>]+onclick="location.href='([^']+)'"/g)];
+      const buttonMatches = [...html.matchAll(/onclick="window\.location\.href='([^']+)'/g)];
 
       let messageLines = ["🎉 e+チケット発売開始！"];
 
@@ -101,7 +101,5 @@ setInterval(() => {
 // --------------------
 const app = express();
 const PORT = process.env.PORT || 3000;
-
 app.get("/", (req, res) => res.send("Watcher running"));
-
 app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
