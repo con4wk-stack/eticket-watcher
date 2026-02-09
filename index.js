@@ -39,22 +39,19 @@ async function checkPage() {
       return;
     }
 
-    let html = await res.text();
-
-    //テスト用記述
-    html = html.replace(/class="button button--default uk-button-\d+"/g, 'class="button button--primary"');
+    const html = await res.text();
 
     // 日付・時間取得（最初の要素だけ）
-    let dateMatch = html.match(/class="block-ticket-article__date">([^<]+)</);
-    let timeMatch = html.match(/class="block-ticket-article__time">([^<]+)</);
+    const dateMatch = html.match(/class="block-ticket-article__date">([^<]+)</);
+    const timeMatch = html.match(/class="block-ticket-article__time">([^<]+)</);
     const ticketDate = dateMatch ? dateMatch[1].trim() : "不明";
     const ticketTime = timeMatch ? timeMatch[1].trim() : "不明";
 
     // 発売前ボタンの正規表現
-    let preButtons = [...html.matchAll(/class="button button--default uk-button-\d+" onclick="([^"]+)"/g)];
+    const preButtons = [...html.matchAll(/class="button button--default uk-button-\d+" onclick="([^"]+)"/g)];
 
     // 発売後ボタンの正規表現
-    let releasedButtons = [...html.matchAll(/class="button button--primary"/g)];
+    const releasedButtons = [...html.matchAll(/class="button button--primary"/g)];
 
     // 発売前ボタンごとに状態確認
     preButtons.forEach((match, idx) => {
