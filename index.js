@@ -6,9 +6,10 @@ const url = "https://eplus.jp/sf/detail/0473460001";
 const LINE_TOKEN = "53HSL37fngc+EuTIdX2tBlWHdwb4evtfo1ZRLb1XK1uETtS9FeBOLqHVCUQvO7YVssWAI/W1NfQ8yUPVIuQFY7425HbkBwzLmj2Ljt7zT0xcNhKgcNj/P5C631nktl1O44WQb2m+JLWQ/lF+CYUdxQdB04t89/1O/w1cDnyilFU=";
 const LINE_USER_ID = "Uaa7df44a6257eecb60409c763c087be5";
 const INTERVAL = 30000; // 30秒
+const FETCH_TIMEOUT = 10000; // 10秒
 // ===================
 
-// Render用ダミーサーバー（常駐維持用）
+// Render用ダミーサーバー
 const app = express();
 const PORT = process.env.PORT || 3000;
 app.get("/", (req, res) => res.send("Watcher running"));
@@ -16,101 +17,119 @@ app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
 
 console.log("Watcher started:", new Date().toISOString());
 
-// ボタンごとの状態管理
-let lastStates = {};
+// 前回チケットがあったか
+let wasReleased = false;
 
-// HTML から href を取得する関数
+// onclick から href を抜き出す
 function extractHref(onclick) {
   const match = onclick.match(/window\.location\.href='([^']+)'/);
-  return match ? match[1] : null;
+  return match ? match[1] : "";
 }
 
-// ページチェック関数（最新版）
-async function checkPage() {
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 10000); // 10秒タイムアウト
+// 時間テキスト整形
+function cleanTime(text) {
+  return text
+    .replace(/\s+/g, " ")
+    .replace(/（/g, "\n（")
+    .trim();
+}
 
+async function checkPage() {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
+
+  try {
     const res = await fetch(url, { signal: controller.signal });
     clearTimeout(timeout);
 
     if (!res.ok) {
       console.log("Fetch failed:", res.status);
-      return;
+      return; // 503などでは落ちない
     }
 
     const html = await res.text();
 
-    // 日付取得（最初の要素だけ）
-    const dateMatch = html.match(/class="block-ticket-article__date">([^<]+)</);
+    // 発売中ボタン検出
+    const releasedButtons = [
+      ...html.matchAll(
+        /class="button button--primary"[^>]*onclick="([^"]+)"/g
+      )
+    ];
+
+    const isReleasedNow = releasedButtons.length > 0;
+
+    // 日付
+    const dateMatch = html.match(
+      /class="block-ticket-article__date">([^<]+)</
+    );
     const ticketDate = dateMatch ? dateMatch[1].trim() : "不明";
 
-    // 時間取得（最初の要素だけ）
-    const timeMatch = html.match(/class="block-ticket-article__time">([\s\S]*?)</);
-    let ticketTimeRaw = timeMatch ? timeMatch[1] : "不明";
+    // 時間
+    const timeMatch = html.match(
+      /class="block-ticket-article__time">([\s\S]*?)<\/span>/
+    );
+    const ticketTime = timeMatch ? cleanTime(timeMatch[1]) : "不明";
 
-    // ticketTime を整形（改行・空白除去、見やすく）
-    const ticketTime = ticketTimeRaw
-      .split(/\r?\n/)           // 改行で分割
-      .map(line => line.trim())  // 前後空白削除
-      .filter(line => line)      // 空行を削除
-      .join('\n');               // 改行で再結合
+    // チケットなし → 状態リセット
+    if (!isReleasedNow) {
+      wasReleased = false;
+      console.log("Checked at:", new Date().toISOString(), "(no tickets)");
+      return;
+    }
 
-    // 発売前ボタン（uk-button-数字は無視）
-    const preButtons = [...html.matchAll(/class="button button--default" onclick="([^"]+)"/g)];
+    // すでに発売中として処理済み
+    if (wasReleased) {
+      console.log(
+        "Checked at:",
+        new Date().toISOString(),
+        "(already released)"
+      );
+      return;
+    }
 
-    // 発売後ボタン
-    const releasedButtons = [...html.matchAll(/class="button button--primary"/g)];
+    // ===== 発売 or 戻りチケ検知 =====
+    const links = releasedButtons
+      .map(m => extractHref(m[1]))
+      .filter(Boolean)
+      .join("\n");
 
-    // 発売前ボタンごとに状態確認
-    preButtons.forEach((match, idx) => {
-      const onclick = match[1];
-      const href = extractHref(onclick);
-      const id = `btn-${idx}`;
+    const message = `🎉 e+チケット販売中！
 
-      if (!lastStates[id]) lastStates[id] = false;
+日付:
+${ticketDate}
 
-      const isReleased = releasedButtons.length > 0; // 1つでも発売後ボタンがあれば発売開始
-
-      if (isReleased && !lastStates[id]) {
-        // 発売前 → 発売 に切り替わった
-        lastStates[id] = true;
-
-        // LINE通知メッセージ作成
-        const message = `🎉 e+チケット発売開始！
-日付: ${ticketDate}
+開演:
 ${ticketTime}
-リンク: ${href}
 
-一覧ページ: ${url}`;
+リンク:
+${links}
 
-        // LINE通知
-        if (LINE_TOKEN && LINE_USER_ID) {
-          fetch("https://api.line.me/v2/bot/message/push", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${LINE_TOKEN}`,
-            },
-            body: JSON.stringify({
-              to: LINE_USER_ID,
-              messages: [{ type: "text", text: message }],
-            }),
-          })
-            .then(() => console.log("LINE通知送信:", href))
-            .catch(err => console.log("LINE通知エラー:", err.message));
-        } else {
-          console.log("LINE_TOKEN または LINE_USER_ID が未設定");
-        }
+一覧ページ:
+${url}`;
 
-      } else if (!isReleased && lastStates[id]) {
-        // 発売前に戻った場合も状態更新（念のため）
-        lastStates[id] = false;
-      }
+    await fetch("https://api.line.me/v2/bot/message/push", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${LINE_TOKEN}`,
+      },
+      body: JSON.stringify({
+        to: LINE_USER_ID,
+        messages: [{ type: "text", text: message }],
+      }),
     });
 
-    console.log("Checked at:", new Date().toISOString());
+    wasReleased = true;
+    console.log("Detected ticket availability & sent LINE notification");
+
   } catch (err) {
+    clearTimeout(timeout);
+
+    if (err.name === "AbortError") {
+      console.log("Fetch timeout, will retry at next interval");
+      return;  // 次の30秒後のチェックで再試行
+    }
+
     console.log("Error during check:", err.message);
   }
 }
