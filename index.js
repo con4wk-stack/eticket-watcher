@@ -1,139 +1,104 @@
 import fetch from "node-fetch";
 import express from "express";
 
-// ====== 設定 ======
 const url = "https://eplus.jp/sf/detail/0473460001";
 const LINE_TOKEN = "53HSL37fngc+EuTIdX2tBlWHdwb4evtfo1ZRLb1XK1uETtS9FeBOLqHVCUQvO7YVssWAI/W1NfQ8yUPVIuQFY7425HbkBwzLmj2Ljt7zT0xcNhKgcNj/P5C631nktl1O44WQb2m+JLWQ/lF+CYUdxQdB04t89/1O/w1cDnyilFU=";
 const LINE_USER_ID = "Uaa7df44a6257eecb60409c763c087be5";
-const INTERVAL = 30000; // 30秒
-const FETCH_TIMEOUT = 10000; // 10秒
-// ===================
 
-// Render用ダミーサーバー
+const NORMAL_INTERVAL = 30000; // 通常30秒
+const BATTLE_INTERVAL = 15000; // 戦闘15秒
+const RETRY_DELAY = 5000; // 失敗時5秒後リトライ
+const TIMEOUT = 15000; // 15秒timeout
+
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 app.get("/", (req, res) => res.send("Watcher running"));
 app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
 
 console.log("Watcher started:", new Date().toISOString());
 
-// 前回チケットがあったか
-let wasReleased = false;
+let lastState = false;
+let retrying = false;
 
-// onclick から href を抜き出す
-function extractHref(onclick) {
-  const match = onclick.match(/window\.location\.href='([^']+)'/);
-  return match ? match[1] : "";
-}
+function isBattleTime() {
+  const now = new Date();
+  const japan = new Date(now.toLocaleString("en-US", { timeZone: "Asia/Tokyo" }));
+  const hour = japan.getHours();
+  const minute = japan.getMinutes();
 
-// 時間テキスト整形
-function cleanTime(text) {
-  return text
-    .replace(/\s+/g, " ")
-    .replace(/（/g, "\n（")
-    .trim();
+  if (hour === 11 && minute >= 55) return true;
+  if (hour === 12 && minute <= 30) return true;
+  return false;
 }
 
 async function checkPage() {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
-
   try {
-    const res = await fetch(url, { signal: controller.signal });
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), TIMEOUT);
+
+    const res = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
+      },
+    });
+
     clearTimeout(timeout);
 
     if (!res.ok) {
       console.log("Fetch failed:", res.status);
-      return; // 503などでは落ちない
+      throw new Error("Fetch status error");
     }
 
     const html = await res.text();
 
-    // 発売中ボタン検出
-    const releasedButtons = [
-      ...html.matchAll(
-        /class="button button--primary"[^>]*onclick="([^"]+)"/g
-      )
-    ];
+    const isReleased = html.includes("button--primary");
 
-    const isReleasedNow = releasedButtons.length > 0;
+    if (isReleased) {
+      console.log("Checked at:", new Date().toISOString(), "(released)");
 
-    // 日付
-    const dateMatch = html.match(
-      /class="block-ticket-article__date">([^<]+)</
-    );
-    const ticketDate = dateMatch ? dateMatch[1].trim() : "不明";
+      // 未リリース→リリースに変わったときだけ通知（再販のたびに1回ずつ通知される）
+      if (!lastState && LINE_TOKEN && LINE_USER_ID) {
+        const message = `🎉 チケット販売中！\n${url}`;
 
-    // 時間
-    const timeMatch = html.match(
-      /class="block-ticket-article__time">([\s\S]*?)<\/span>/
-    );
-    const ticketTime = timeMatch ? cleanTime(timeMatch[1]) : "不明";
+        await fetch("https://api.line.me/v2/bot/message/push", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${LINE_TOKEN}`,
+          },
+          body: JSON.stringify({
+            to: LINE_USER_ID,
+            messages: [{ type: "text", text: message }],
+          }),
+        });
 
-    // チケットなし → 状態リセット
-    if (!isReleasedNow) {
-      wasReleased = false;
-      console.log("Checked at:", new Date().toISOString(), "(no tickets)");
-      return;
+        console.log("LINE通知送信完了");
+      }
+    } else {
+      console.log("Checked at:", new Date().toISOString(), "(not released)");
     }
 
-    // すでに発売中として処理済み
-    if (wasReleased) {
-      console.log(
-        "Checked at:",
-        new Date().toISOString(),
-        "(already released)"
-      );
-      return;
-    }
-
-    // ===== 発売 or 戻りチケ検知 =====
-    const links = releasedButtons
-      .map(m => extractHref(m[1]))
-      .filter(Boolean)
-      .join("\n");
-
-    const message = `🎉 e+チケット販売中！
-
-日付:
-${ticketDate}
-
-開演:
-${ticketTime}
-
-リンク:
-${links}
-
-一覧ページ:
-${url}`;
-
-    await fetch("https://api.line.me/v2/bot/message/push", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${LINE_TOKEN}`,
-      },
-      body: JSON.stringify({
-        to: LINE_USER_ID,
-        messages: [{ type: "text", text: message }],
-      }),
-    });
-
-    wasReleased = true;
-    console.log("Detected ticket availability & sent LINE notification");
-
+    lastState = isReleased;
+    retrying = false; // 成功したらリトライ解除
   } catch (err) {
-    clearTimeout(timeout);
+    console.log("Fetch timeout or error");
 
-    if (err.name === "AbortError") {
-      console.log("Fetch timeout, will retry at next interval");
-      return;  // 次の30秒後のチェックで再試行
+    if (!retrying) {
+      retrying = true;
+      console.log("Retrying in 5 seconds...");
+      setTimeout(checkPage, RETRY_DELAY);
     }
-
-    console.log("Error during check:", err.message);
   }
 }
 
-// 監視開始
-setInterval(checkPage, INTERVAL);
-checkPage();
+function scheduleNextCheck() {
+  const interval = isBattleTime() ? BATTLE_INTERVAL : NORMAL_INTERVAL;
+  setTimeout(async () => {
+    await checkPage().catch(() => {}); // エラーでも次を必ずスケジュールする
+    scheduleNextCheck();
+  }, interval);
+}
+
+scheduleNextCheck();
