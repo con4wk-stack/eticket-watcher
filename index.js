@@ -40,7 +40,8 @@ function parseReleasedItems(html) {
   const items = [];
   const dateRe = /20\d{2}\/\s*\d{1,2}\/\d{1,2}\([金土日水火木]\)/g;
   const timeRe = /開演[：:]\s*(\d{1,2}:\d{2})/;
-  const detailLinkRe = /href="(https?:\/\/[^"]*eplus[^"]*|\/[^"]+)"[^>]*>[\s\S]*?詳細を表示する/g;
+  // button--primary の onclick 内 window.location.href='...' からURLを取得
+  const detailLinkRe = /window\.location\.href='([^']+)'/g;
 
   const seen = new Set();
   let dateMatch;
@@ -61,8 +62,7 @@ function parseReleasedItems(html) {
     let linkMatch;
     detailLinkRe.lastIndex = 0;
     while ((linkMatch = detailLinkRe.exec(block)) !== null) {
-      let href = linkMatch[1];
-      if (href.startsWith("/")) href = BASE_URL + href;
+      const href = linkMatch[1];
       if (!links.includes(href)) links.push(href);
     }
     items.push({ 公演日, 公演時間, 詳細リンク: links });
@@ -73,17 +73,17 @@ function parseReleasedItems(html) {
 function buildNotificationMessage(releasedItems, pageUrl) {
   const lines = ["🎉 チケット戻ったよ！🥎", ""];
   for (const item of releasedItems) {
-    lines.push(`【公演日】${item.公演日}`);
-    lines.push(`【公演時間】${item.公演時間 || "—"}`);
+    const dateTime = `${item.公演日}　${item.公演時間 || "—"}～`;
+    lines.push(dateTime);
     for (const link of item.詳細リンク) {
-      lines.push(`【詳細】${link}`);
+      lines.push(link);
     }
     if (item.詳細リンク.length === 0) {
-      lines.push("【詳細】—");
+      lines.push("(詳細リンクなし)");
     }
     lines.push("");
   }
-  lines.push(`【ページURL】${pageUrl}`);
+  lines.push(`ページURL\n${pageUrl}`);
   return lines.join("\n").trim();
 }
 
