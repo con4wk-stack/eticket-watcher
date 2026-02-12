@@ -35,7 +35,8 @@ function isBattleTime() {
 function parseReleasedItems(html) {
   const items = [];
   const dateRe = /20\d{2}\/\s*\d{1,2}\/\d{1,2}\([^\)]+\)/g;
-  const timeRe = /開演[：:]\s*(\d{1,2}:\d{2})/;
+  // 開演時間（半角・全角コロン両方、時刻も 18:00 / 18：00 対応）
+  const timeRe = /開演[：:]\s*(\d{1,2}[：:]\d{2})/;
   const detailLinkRe = /window\.location\.href='([^']+)'/g;
 
   // 公演日の出現位置をすべて取得（ブロック境界に使う）
@@ -45,10 +46,12 @@ function parseReleasedItems(html) {
     dateMatches.push({ index: m.index, text: m[0] });
   }
 
+  const MIN_BLOCK_LEN = 3000; // 同じ日付が連続する場合でも開演時間まで含める
   for (let i = 0; i < dateMatches.length; i++) {
     const blockStart = dateMatches[i].index;
-    const blockEnd = i + 1 < dateMatches.length ? dateMatches[i + 1].index : html.length;
-    const block = html.slice(blockStart, blockEnd);
+    const nextStart = i + 1 < dateMatches.length ? dateMatches[i + 1].index : html.length;
+    const blockEnd = Math.max(nextStart, blockStart + MIN_BLOCK_LEN);
+    const block = html.slice(blockStart, Math.min(blockEnd, html.length));
 
     if (!block.includes("button--primary")) continue;
 
