@@ -64,11 +64,14 @@ function parseReleasedItems(html) {
     const 公演時間 = 公演時間Raw.replace(/\s+/g, " ").trim();
 
     const links = [];
+    const seenUrls = new Set();
     let linkMatch;
     detailLinkRe.lastIndex = 0;
     while ((linkMatch = detailLinkRe.exec(block)) !== null) {
-      const href = linkMatch[1];
-      if (!links.includes(href)) links.push(href);
+      const href = linkMatch[1].replace(/&amp;/g, "&").trim();
+      if (seenUrls.has(href)) continue;
+      seenUrls.add(href);
+      links.push(href);
     }
 
     items.push({ 公演日, 公演時間, 詳細リンク: links });
