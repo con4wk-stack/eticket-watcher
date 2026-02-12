@@ -9,6 +9,8 @@ const NORMAL_INTERVAL = 30000;
 const BATTLE_INTERVAL = 15000;
 const RETRY_DELAY = 5000;
 const TIMEOUT = 15000;
+const FIVE_XX_RETRY_COUNT = 3;   // 5xx 時の同一チェック内リトライ回数
+const FIVE_XX_RETRY_WAIT_MS = 15000; // 5xx リトライまでの待機（ミリ秒）
 
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -18,8 +20,9 @@ app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
 console.log("Watcher started:", new Date().toISOString());
 
 let retrying = false;
-// 通知済み公演（key = 公演日-公演時間）。売り切れで一覧から消えた公演は削除し、再販で再通知する
-let notifiedKeys = new Set();
+// 各ボタンの前回の状態。key = 公演日-公演時間-詳細リンク → true=primary, false=default
+// default→primary になったときだけ通知し、primary→default になったら false に戻す（再販でまた通知できる）
+let lastButtonState = new Map();
 
 function isBattleTime() {
   const now = new Date();
@@ -32,16 +35,17 @@ function isBattleTime() {
   return false;
 }
 
-function parseReleasedItems(html) {
+/**
+ * ページ内の全ボタン（primary も default も）をブロック単位で取得する。
+ * 戻り: { 公演日, 公演時間, 詳細リンク, isPrimary }[]
+ */
+function parseAllBlocks(html) {
   const items = [];
   const detailLinkRe = /window\.location\.href='([^']+)'/g;
 
-  // class="block-ticket-article__date" の要素内容を取得
   const dateClassRe = /class="[^"]*block-ticket-article__date[^"]*"[^>]*>([\s\S]*?)<\/\w+>/g;
-  // class="block-ticket-article__time" の要素内容を取得（改行は後で削除）
   const timeClassRe = /class="[^"]*block-ticket-article__time[^"]*"[^>]*>([\s\S]*?)<\/\w+>/g;
 
-  // ブロック境界：block-ticket-article__date の出現位置
   const blockStarts = [];
   let dm;
   while ((dm = dateClassRe.exec(html)) !== null) {
@@ -55,7 +59,9 @@ function parseReleasedItems(html) {
     const blockEnd = Math.max(nextStart, blockStart + MIN_BLOCK_LEN);
     const block = html.slice(blockStart, Math.min(blockEnd, html.length));
 
-    if (!block.includes("button--primary")) continue;
+    const hasPrimary = block.includes("button--primary");
+    const hasDefault = block.includes("button--default");
+    if (!hasPrimary && !hasDefault) continue;
 
     const 公演日 = blockStarts[i].dateText;
     timeClassRe.lastIndex = 0;
@@ -74,7 +80,12 @@ function parseReleasedItems(html) {
       links.push(href);
     }
 
-    items.push({ 公演日, 公演時間, 詳細リンク: links });
+    items.push({
+      公演日,
+      公演時間,
+      詳細リンク: links,
+      isPrimary: hasPrimary,
+    });
   }
 
   return items;
@@ -99,39 +110,58 @@ function buildNotificationMessage(item, pageUrl) {
   return lines.join("\n");
 }
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 async function checkPage() {
   try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), TIMEOUT);
+    let res;
+    for (let attempt = 0; attempt < FIVE_XX_RETRY_COUNT; attempt++) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), TIMEOUT);
 
-    const res = await fetch(url, {
-      signal: controller.signal,
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-      },
-    });
+      res = await fetch(url, {
+        signal: controller.signal,
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        },
+      });
 
-    clearTimeout(timeout);
+      clearTimeout(timeout);
 
-    if (!res.ok) {
-      console.log("Fetch failed:", res.status);
-      throw new Error("Fetch status error");
+      if (res.ok) break;
+
+      if (res.status >= 500 && attempt < FIVE_XX_RETRY_COUNT - 1) {
+        console.log("5xx:", res.status, "→", attempt + 2, "/", FIVE_XX_RETRY_COUNT, "回目を", FIVE_XX_RETRY_WAIT_MS / 1000, "秒後にリトライ");
+        await sleep(FIVE_XX_RETRY_WAIT_MS);
+        continue;
+      }
+
+      if (!res.ok) {
+        console.log("Fetch failed:", res.status);
+        if (res.status >= 500) {
+          console.log("今回のチェックはスキップ、次回の間隔で再試行します");
+          return;
+        }
+        throw new Error("Fetch status error");
+      }
     }
 
     const html = await res.text();
-    const releasedItems = parseReleasedItems(html);
+    const allBlocks = parseAllBlocks(html);
 
-    const currentKeys = new Set();
+    for (const block of allBlocks) {
+      const link = block.詳細リンク.length ? block.詳細リンク[0].replace(/&amp;/g, "&").trim() : "";
+      const key = `${block.公演日}-${block.公演時間}-${link}`;
+      const wasPrimary = lastButtonState.get(key);
 
-    for (const item of releasedItems) {
-      const key = `${item.公演日}-${item.公演時間}`;
-      currentKeys.add(key);
-
-      // 新しく出現した公演だけ通知（売り切れ→再販で再び出現した場合も通知）
-      if (!notifiedKeys.has(key)) {
+      // default → primary になったときだけ通知（初回も wasPrimary が undefined なので通知）
+      if (block.isPrimary && wasPrimary !== true) {
         if (LINE_TOKEN && LINE_USER_ID) {
-          const message = buildNotificationMessage(item, url);
+          const message = buildNotificationMessage(
+            { 公演日: block.公演日, 公演時間: block.公演時間, 詳細リンク: block.詳細リンク },
+            url
+          );
 
           const lineRes = await fetch("https://api.line.me/v2/bot/message/push", {
             method: "POST",
@@ -146,22 +176,24 @@ async function checkPage() {
           });
 
           if (lineRes.ok) {
-            console.log("LINE通知送信:", key);
+            console.log("LINE通知送信:", block.公演日, block.公演時間);
           } else {
             const errBody = await lineRes.text();
             console.error("LINE API エラー:", lineRes.status, errBody);
           }
         }
-
-        notifiedKeys.add(key);
       }
+
+      lastButtonState.set(key, block.isPrimary);
     }
 
-    // 消えた公演は通知済みから削除（再出現でまた通知できる）
-    for (const key of notifiedKeys) {
-      if (!currentKeys.has(key)) {
-        notifiedKeys.delete(key);
-      }
+    // 今回のページに無い key は削除（公演が一覧から消えた場合）
+    for (const key of lastButtonState.keys()) {
+      const found = allBlocks.some((b) => {
+        const l = b.詳細リンク.length ? b.詳細リンク[0].replace(/&amp;/g, "&").trim() : "";
+        return `${b.公演日}-${b.公演時間}-${l}` === key;
+      });
+      if (!found) lastButtonState.delete(key);
     }
 
     console.log("Checked at:", new Date().toISOString());
