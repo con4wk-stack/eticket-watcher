@@ -34,30 +34,34 @@ function isBattleTime() {
 
 function parseReleasedItems(html) {
   const items = [];
-  const dateRe = /20\d{2}\/\s*\d{1,2}\/\d{1,2}\([^\)]+\)/g;
-  // 開演時間（半角・全角コロン両方、時刻も 18:00 / 18：00 対応）
-  const timeRe = /開演[：:]\s*(\d{1,2}[：:]\d{2})/;
   const detailLinkRe = /window\.location\.href='([^']+)'/g;
 
-  // 公演日の出現位置をすべて取得（ブロック境界に使う）
-  const dateMatches = [];
-  let m;
-  while ((m = dateRe.exec(html)) !== null) {
-    dateMatches.push({ index: m.index, text: m[0] });
+  // class="block-ticket-article__date" の要素内容を取得
+  const dateClassRe = /class="[^"]*block-ticket-article__date[^"]*"[^>]*>([\s\S]*?)<\/\w+>/g;
+  // class="block-ticket-article__time" の要素内容を取得（改行は後で削除）
+  const timeClassRe = /class="[^"]*block-ticket-article__time[^"]*"[^>]*>([\s\S]*?)<\/\w+>/g;
+
+  // ブロック境界：block-ticket-article__date の出現位置
+  const blockStarts = [];
+  let dm;
+  while ((dm = dateClassRe.exec(html)) !== null) {
+    blockStarts.push({ index: dm.index, dateText: dm[1].replace(/\s+/g, " ").trim() });
   }
 
-  const MIN_BLOCK_LEN = 3000; // 同じ日付が連続する場合でも開演時間まで含める
-  for (let i = 0; i < dateMatches.length; i++) {
-    const blockStart = dateMatches[i].index;
-    const nextStart = i + 1 < dateMatches.length ? dateMatches[i + 1].index : html.length;
+  const MIN_BLOCK_LEN = 3000;
+  for (let i = 0; i < blockStarts.length; i++) {
+    const blockStart = blockStarts[i].index;
+    const nextStart = i + 1 < blockStarts.length ? blockStarts[i + 1].index : html.length;
     const blockEnd = Math.max(nextStart, blockStart + MIN_BLOCK_LEN);
     const block = html.slice(blockStart, Math.min(blockEnd, html.length));
 
     if (!block.includes("button--primary")) continue;
 
-    const 公演日 = dateMatches[i].text.replace(/\s+/g, " ").trim();
-    const timeMatch = block.match(timeRe);
-    const 公演時間 = timeMatch ? timeMatch[1] : "";
+    const 公演日 = blockStarts[i].dateText;
+    timeClassRe.lastIndex = 0;
+    const timeMatch = timeClassRe.exec(block);
+    const 公演時間Raw = timeMatch ? timeMatch[1] : "";
+    const 公演時間 = 公演時間Raw.replace(/\s+/g, " ").trim();
 
     const links = [];
     let linkMatch;
