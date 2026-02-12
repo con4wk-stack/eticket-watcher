@@ -75,7 +75,7 @@ function parseReleasedItems(html) {
 
 function buildNotificationMessage(item, pageUrl) {
   const lines = [
-    "🎉 チケット戻ったよ！🥎",
+    "🎉 チケット戻ったよ！🎾",
     "",
     `公演日：${item.公演日}`,
     `開演：${item.公演時間 || "—"}～`,
