@@ -120,7 +120,7 @@ async function checkPage() {
         const message =
           releasedItems.length > 0
             ? buildNotificationMessage(releasedItems, url)
-            : `🎉 チケット販売中！\n${url}`;
+            : `🎉 チケット戻ったよ！🥎\n${url}`;
 
         await fetch("https://api.line.me/v2/bot/message/push", {
           method: "POST",
