@@ -3,7 +3,7 @@ import express from "express";
 
 const url = "https://eplus.jp/sf/detail/0473460001";
 const LINE_TOKEN = "53HSL37fngc+EuTIdX2tBlWHdwb4evtfo1ZRLb1XK1uETtS9FeBOLqHVCUQvO7YVssWAI/W1NfQ8yUPVIuQFY7425HbkBwzLmj2Ljt7zT0xcNhKgcNj/P5C631nktl1O44WQb2m+JLWQ/lF+CYUdxQdB04t89/1O/w1cDnyilFU=";
-const LINE_USER_ID = "Uaa7df44a6257eecb60409c763c087be5";
+const LINE_USER_ID = "C755fb6ffbd64b76818fd0a4dac5b130f";
 
 const NORMAL_INTERVAL = 30000;
 const BATTLE_INTERVAL = 15000;
