@@ -13,8 +13,14 @@ const FIVE_XX_RETRY_COUNT = 3;   // 5xx 時の同一チェック内リトライ�
 const FIVE_XX_RETRY_WAIT_MS = 15000; // 5xx リトライまでの待機（ミリ秒）
 
 const app = express();
+app.use(express.json());
 const PORT = process.env.PORT || 10000;
 app.get("/", (req, res) => res.send("Watcher running"));
+app.post("/webhook", (req, res) => {
+  console.log("Webhook受信:");
+  console.log(JSON.stringify(req.body, null, 2));
+  res.sendStatus(200);
+});
 app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
 
 console.log("Watcher started:", new Date().toISOString());
