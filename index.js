@@ -318,8 +318,6 @@ async function checkDetailPage() {
       detailUrl = extractedUrl;
       console.log("[detail] onclick:", onclickValue ?? "(なし)");
       console.log("[detail] extracted url:", detailUrl);
-
-      // sp.atom → atom に変換（403回避）
       if (detailUrl.includes("sp.atom.eplus.jp")) {
         detailUrl = detailUrl.replace("sp.atom.eplus.jp", "atom.eplus.jp");
       }
