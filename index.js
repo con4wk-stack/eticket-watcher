@@ -232,7 +232,6 @@ function scheduleNextCheck() {
 scheduleNextCheck();
 
 // ===== 個ページ監視（一覧の最後のボタンのURLから個別ページを取得） =====
-
 /** 一覧HTMLから、最後の詳細ボタンのURLと公演情報を取得 */
 function getDetailUrlFromListHtml(html) {
   const blocks = parseAllBlocks(html);
@@ -251,9 +250,17 @@ function getDetailUrlFromListHtml(html) {
 const DETAIL_HEADERS = {
   "User-Agent":
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-  Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+  Accept:
+    "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
   "Accept-Language": "ja-JP,ja;q=0.9",
-  Referer: "https://eplus.jp/",
+  "Cache-Control": "no-cache",
+  "Upgrade-Insecure-Requests": "1",
+  Referer: url,
+  Origin: "https://eplus.jp",
+  "Sec-Fetch-Dest": "document",
+  "Sec-Fetch-Mode": "navigate",
+  "Sec-Fetch-Site": "same-site",
+  "Sec-Fetch-User": "?1",
 };
 
 let lastDetailState = null;
@@ -314,7 +321,8 @@ async function checkDetailPage() {
         if (setCookieList && setCookieList.length > 0) {
           cookie = setCookieList.map((s) => s.split(";")[0].trim()).join("; ");
         }
-      } else if (listRes.headers.get) {
+      }
+      if (!cookie && listRes.headers.get) {
         const v = listRes.headers.get("set-cookie");
         if (v) cookie = v.split(";")[0].trim();
       }
@@ -325,6 +333,7 @@ async function checkDetailPage() {
         signal: detailController.signal,
         headers: {
           ...DETAIL_HEADERS,
+          Referer: url,
           ...(cookie ? { Cookie: cookie } : {}),
         },
       });
@@ -427,4 +436,5 @@ async function checkDetailPage() {
   }
 }
 
+checkDetailPage();
 setInterval(checkDetailPage, 30000);
