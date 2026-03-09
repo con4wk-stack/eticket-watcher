@@ -4,9 +4,11 @@ import express from "express";
 const url = "https://eplus.jp/sf/detail/0473460001";
 const LINE_TOKEN = "53HSL37fngc+EuTIdX2tBlWHdwb4evtfo1ZRLb1XK1uETtS9FeBOLqHVCUQvO7YVssWAI/W1NfQ8yUPVIuQFY7425HbkBwzLmj2Ljt7zT0xcNhKgcNj/P5C631nktl1O44WQb2m+JLWQ/lF+CYUdxQdB04t89/1O/w1cDnyilFU=";
 const LINE_USER_ID = "C755fb6ffbd64b76818fd0a4dac5b130f";
-// Chatwork（LINE上限時用）。環境変数 CHATWORK_TOKEN / CHATWORK_ROOM_ID か、下記に直接指定。空なら通知しない
-const CHATWORK_TOKEN = process.env.CHATWORK_TOKEN || "f03fec5446114f0da54c391afcbab29e";  // ここにAPIトークンを入れても可
-const CHATWORK_ROOM_ID = process.env.CHATWORK_ROOM_ID || "https://www.chatwork.com/#!rid425373870"; // ここにルームIDを入れても可
+// Chatwork（常にLINEとChatworkの両方に送信）。環境変数 CHATWORK_TOKEN / CHATWORK_ROOM_ID か、下記に直接指定。空ならChatworkは送らない
+// ルームIDは「数字だけ」か「ルームURL」（#!rid の後ろの数字を自動抽出）
+const _cwRoomRaw = (process.env.CHATWORK_ROOM_ID || "rid425373870").trim();
+const CHATWORK_TOKEN = (process.env.CHATWORK_TOKEN || "f03fec5446114f0da54c391afcbab29e").trim();
+const CHATWORK_ROOM_ID = _cwRoomRaw.match(/rid(\d+)/)?.[1] || _cwRoomRaw.replace(/\D/g, "") || "";
 
 
 
@@ -137,17 +139,18 @@ function buildNotificationMessage(item, pageUrl) {
 /** Chatwork にメッセージを送信（TOKEN と ROOM_ID が設定されている場合のみ） */
 async function sendChatworkMessage(text) {
   if (!CHATWORK_TOKEN || !CHATWORK_ROOM_ID) return;
-  const res = await fetch(
-    `https://api.chatwork.com/v2/rooms/${CHATWORK_ROOM_ID}/messages`,
-    {
-      method: "POST",
-      headers: {
-        "X-ChatWorkToken": CHATWORK_TOKEN,
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
-      body: new URLSearchParams({ body: text }).toString(),
-    }
-  );
+  const roomId = String(CHATWORK_ROOM_ID).trim();
+  if (!roomId) return;
+  const apiUrl = `https://api.chatwork.com/v2/rooms/${roomId}/messages`;
+  const body = new URLSearchParams({ body: text }).toString();
+  const res = await fetch(apiUrl, {
+    method: "POST",
+    headers: {
+      "X-ChatWorkToken": CHATWORK_TOKEN,
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body,
+  });
   if (res.ok) {
     console.log("Chatwork通知送信 OK");
   } else {
@@ -310,13 +313,26 @@ const DETAIL_HEADERS = {
 
 let lastDetailState = null;
 let detailRetrying = false;
+/** Playwright が使えない場合、当日引換券チェックをスキップ（初回だけログ、以降は無視） */
+let detailPlaywrightUnavailable = false;
+let detailPlaywrightLogged = false;
 
 /**
  * Playwright で一覧→詳細の順に開き、詳細ページの HTML を取得（403回避）
  * Node 18 以上推奨（Playwright の要件）
  */
 async function fetchDetailHtml(listUrl, detailUrl) {
-  const { chromium } = await import("playwright");
+  let playwright;
+  try {
+    playwright = await import("playwright");
+  } catch (e) {
+    if (!detailPlaywrightLogged) {
+      detailPlaywrightLogged = true;
+      console.log("[detail] Playwright が利用できないため当日引換券チェックはスキップします（入れたら自動で有効になります）");
+    }
+    throw e;
+  }
+  const { chromium } = playwright;
   const browser = await chromium.launch({ headless: true });
   try {
     const context = await browser.newContext({
@@ -340,6 +356,8 @@ async function fetchDetailHtml(listUrl, detailUrl) {
 
 async function checkDetailPage() {
   try {
+    if (detailPlaywrightUnavailable) return;
+
     let html = "";
     let detailUrl = null;
 
@@ -403,7 +421,10 @@ async function checkDetailPage() {
         console.log("[detail] status: 200 (Playwright)");
         break;
       } catch (e) {
-        console.log("[detail] Playwright error:", e.message);
+        if (e.code === "ERR_MODULE_NOT_FOUND" || /Cannot find package 'playwright'/.test(e.message)) {
+          detailPlaywrightUnavailable = true;
+        }
+        if (!detailPlaywrightUnavailable) console.log("[detail] Playwright error:", e.message);
         if (attempt < FIVE_XX_RETRY_COUNT - 1) continue;
         html = "";
         break;
