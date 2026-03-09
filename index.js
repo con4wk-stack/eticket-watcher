@@ -235,234 +235,75 @@ scheduleNextCheck();
 // 最後のボタンは button--default / button--primary で切り替わる。どちらの状態でも同じURLを使う。
 
 /** 一覧HTMLから、最後の詳細ボタンのURLと公演情報を取得。戻り: { url, 公演日, 公演時間, 公演タイトル } or { url: null } */
-function getDetailUrlFromListHtml(html) {
-  const blocks = parseAllBlocks(html); // button--primary も button--default も含むブロック
-  if (blocks.length === 0) return { url: null };
-  const last = blocks[blocks.length - 1];
-  const link = last.詳細リンク && last.詳細リンク[0];
-  const url = link ? link.replace(/&amp;/g, "&").trim() : null;
-  return {
-    url,
-    公演日: last.公演日,
-    公演時間: last.公演時間,
-    公演タイトル: last.公演タイトル || "",
-  };
-}
+const DETAIL_URL =
+  "https://atom.eplus.jp/sys/main.jsp?prm=U=82:P2=047346:P5=0001:P3=0484:P21=010:P7=13:P6=001:P1=0003:P0=GGWC01:P55=//eplus.jp%2Fsf%2Fdetail%2F0473460001";
 
-const DETAIL_FETCH_HEADERS = {
+const DETAIL_HEADERS = {
   "User-Agent":
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
   Accept:
-    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-  "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+    "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+  "Accept-Language": "ja-JP,ja;q=0.9",
+  Referer: "https://eplus.jp/",
+  "Cache-Control": "no-cache",
 };
 
 let lastDetailState = null;
 
-/** レスポンスから Cookie ヘッダ用の文字列を組み立てる（node-fetch v3 / getSetCookie 対応） */
-function getCookieHeader(res) {
-  let list = [];
-  if (typeof res.headers.getSetCookie === "function") {
-    list = res.headers.getSetCookie();
-  } else if (res.headers.raw && Array.isArray(res.headers.raw["set-cookie"])) {
-    list = res.headers.raw["set-cookie"];
-  } else if (res.headers.get && res.headers.get("set-cookie")) {
-    list = [res.headers.get("set-cookie")];
-  }
-  if (list.length === 0) return undefined;
-  return list
-    .map((s) => s.split(";")[0].trim())
-    .filter(Boolean)
-    .join("; ");
-}
-
-/**
- * 一覧ページにアクセスしてから詳細ページを取得（「一覧から入り直す」再現）
- * 戻り: { ok, status, html, errorType? } 失敗時は errorType で理由を区別
- */
-async function fetchDetailViaList(cookieHeader = undefined) {
-  let listRes;
-  try {
-    const listController = new AbortController();
-    const listTimeout = setTimeout(() => listController.abort(), TIMEOUT);
-    listRes = await fetch(url, {
-      signal: listController.signal,
-      headers: DETAIL_FETCH_HEADERS,
-      redirect: "follow",
-    });
-    clearTimeout(listTimeout);
-  } catch (e) {
-    console.error("[detail] 一覧に戻れなかった（タイムアウト）:", e.message);
-    return { ok: false, status: null, html: null, errorType: "list_timeout" };
-  }
-
-  if (!listRes.ok) {
-    console.error("[detail] 一覧に戻れなかった（HTTP " + listRes.status + "）");
-    return { ok: false, status: listRes.status, html: null, errorType: "list_failed" };
-  }
-  const listHtml = await listRes.text();
-  const { url: detailUrl, 公演日, 公演時間, 公演タイトル } = getDetailUrlFromListHtml(listHtml);
-  if (!detailUrl) {
-    console.log("[detail] 一覧から最後の詳細ボタンのURLを取得できませんでした");
-    return { ok: false, status: null, html: null, errorType: "no_detail_link" };
-  }
-  console.log(
-    "[detail] 一番最後のボタン:",
-    "block-ticket-article__date=" + 公演日,
-    "block-ticket-article__time=" + 公演時間,
-    "block-ticket__title=" + 公演タイトル
-  );
-  console.log("[detail] 一覧の最後のボタンから個別URL取得 → 取得中");
-
-  const cookie = cookieHeader || getCookieHeader(listRes);
-  const cookieCount = cookie ? cookie.split(";").filter((s) => s.trim()).length : 0;
-  if (!cookie) {
-    console.log("[detail] 一覧からCookieを取得できませんでした（403の原因の可能性）");
-  } else {
-    console.log("[detail] 一覧からCookie " + cookieCount + " 件取得");
-  }
-  const headers = {
-    ...DETAIL_FETCH_HEADERS,
-    Referer: url,
-    Origin: new URL(url).origin,
-  };
-  if (cookie) headers.Cookie = cookie;
-
-  let detailRes;
-  try {
-    const detailController = new AbortController();
-    const detailTimeout = setTimeout(() => detailController.abort(), TIMEOUT);
-    detailRes = await fetch(detailUrl, {
-      signal: detailController.signal,
-      headers,
-      redirect: "follow",
-    });
-    clearTimeout(detailTimeout);
-  } catch (e) {
-    console.error("[detail] 一覧から個別ページに入れなかった（タイムアウト）:", e.message);
-    return { ok: false, status: null, html: null, errorType: "detail_timeout" };
-  }
-
-  let html = await detailRes.text();
-
-  if (!detailRes.ok && detailRes.status === 403) {
-    console.log("[detail] 403のため、リダイレクト経由でCookie取得を試行します");
-    const redirectRes = await fetch(detailUrl, {
-      headers: { ...DETAIL_FETCH_HEADERS, Referer: url },
-      redirect: "manual",
-    }).catch(() => null);
-    if (redirectRes && (redirectRes.status === 301 || redirectRes.status === 302 || redirectRes.status === 303)) {
-      const redirectCookie = getCookieHeader(redirectRes);
-      const location = redirectRes.headers.get("location");
-      if (redirectCookie && location) {
-        const fullUrl = location.startsWith("http") ? location : new URL(location, detailUrl).href;
-        const retryRes = await fetch(fullUrl, {
-          headers: {
-            ...DETAIL_FETCH_HEADERS,
-            Referer: url,
-            Cookie: redirectCookie,
-          },
-          redirect: "follow",
-        }).catch(() => null);
-        if (retryRes && retryRes.ok) {
-          html = await retryRes.text();
-          detailRes = { ok: true, status: retryRes.status };
-          return { ok: true, status: detailRes.status, html };
-        }
-      }
-    }
-  }
-
-  if (!detailRes.ok) {
-    console.error("[detail] 一覧から個別ページに入れなかった（HTTP " + detailRes.status + "）");
-    if (detailRes.status === 403) {
-      console.log("[detail] 403の原因候補: Cookie未取得、Referer/Origin拒否、アクセス制限。一覧と個別が別ドメインのためCookieが渡らない場合があります。");
-    }
-    return { ok: false, status: detailRes.status, html: null, errorType: "detail_failed" };
-  }
-  return { ok: true, status: detailRes.status, html };
-}
-
-/** 詳細ページの HTML がエラーページかどうか（タイムアウト・セッション切れ等） */
-function isDetailErrorPage(html) {
-  if (!html || html.length < 500) return true;
-  if (/エラー|タイムアウト|セッションが切れ|再度アクセス|ご利用できません/i.test(html)) return true;
-  if (!html.includes("ticketDate")) return true; // 正常な一覧なら ticketDate がある
-  return false;
-}
-
-let detailRetrying = false;
-
 async function checkDetailPage() {
   try {
-    let res;
-    for (let attempt = 0; attempt < FIVE_XX_RETRY_COUNT; attempt++) {
-      if (attempt > 0) {
-        console.log("[detail] 5xx:", res && res.status, "→", attempt + 1, "/", FIVE_XX_RETRY_COUNT, "回目を", FIVE_XX_RETRY_WAIT_MS / 1000, "秒後にリトライ");
-        await sleep(FIVE_XX_RETRY_WAIT_MS);
-      }
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), TIMEOUT);
 
-      // 一覧を取得 → 最後の「詳細」ボタンのURLを取得 → そのURLで個別ページを取得
-      res = await fetchDetailViaList();
+    const res = await fetch(DETAIL_URL, {
+      headers: DETAIL_HEADERS,
+      signal: controller.signal,
+    });
 
-      const is5xx = res && res.status >= 500;
-      if (res && res.ok) break;
-      if (is5xx && attempt < FIVE_XX_RETRY_COUNT - 1) continue;
-      break;
-    }
+    clearTimeout(timeout);
 
-    if (!res || !res.ok) {
-      if (res && res.status >= 500) {
-        console.log("[detail] 今回のチェックはスキップ、次回の間隔で再試行します（HTTP " + res.status + "）");
-      } else if (res && res.errorType === "no_detail_link") {
-        console.log("[detail] 一覧に詳細ボタンがありません（スキップ）");
-      } else if (res && res.errorType) {
-        console.error("[detail] タイムアウト復活できませんでした（一覧経由の再試行も失敗）");
-      } else {
-        console.error("[detail] 詳細ページの取得に失敗（HTTP " + (res ? res.status : "—") + "）");
-      }
+    if (!res.ok) {
+      console.log("[detail] fetch failed:", res.status);
       return;
     }
 
-    const html = res.html;
-    if (isDetailErrorPage(html)) {
-      console.error("[detail] 一覧から個別ページに入れなかった（エラーページが表示された）");
+    const html = await res.text();
+
+    if (!html.includes("ticketDate")) {
+      console.log("[detail] ページ取得失敗（テーブル無し）");
       return;
     }
 
     const rows = [...html.matchAll(/<tr>([\s\S]*?)<\/tr>/g)];
-    const normalTickets = [];
-    let rowsWithTicketDate = 0;
+
+    const availableDates = [];
 
     for (const row of rows) {
       const dateMatch = row[1].match(/ticketDate[\s\S]*?>([\s\S]*?)<\/span>/);
+
       if (!dateMatch) continue;
 
-      rowsWithTicketDate++;
       const date = dateMatch[1].replace(/\s+/g, " ").trim();
+
       const cells = [...row[1].matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)];
+
       if (cells.length < 2) continue;
 
       const normal = cells[0][1];
-      // if (normal.includes("○") || normal.includes("△"))
-      if (normal.includes("×")) {
-        normalTickets.push(date);
+
+      // 当日引換券 在庫チェック
+      if (normal.includes("○") || normal.includes("△")) {
+        availableDates.push(date);
       }
     }
 
-    if (rowsWithTicketDate > 0) {
-      console.log("[detail] テーブル取得OK: <tr>=" + rows.length + "件, ticketDate付き=" + rowsWithTicketDate + "件, 対象公演日=" + normalTickets.length + "件", normalTickets.length ? "→ " + normalTickets.join(", ") : "");
-    } else {
-      console.log("[detail] テーブル取得NG: <tr>=" + rows.length + "件, ticketDate付き=0件（正しく取れていません）");
-    }
+    const state = JSON.stringify(availableDates);
 
-    const state = JSON.stringify(normalTickets);
-
-    if (state !== lastDetailState && normalTickets.length > 0) {
+    if (state !== lastDetailState && availableDates.length > 0) {
       const message = [
         "🎫 当日引換券が復活！",
         "",
-        ...normalTickets,
+        ...availableDates,
         "",
         url,
       ].join("\n");
@@ -481,31 +322,21 @@ async function checkDetailPage() {
         });
 
         if (lineRes.ok) {
-          console.log("detail LINE通知送信:", normalTickets.length, "件");
+          console.log("[detail] LINE通知送信:", availableDates.length);
         } else {
-          const errBody = await lineRes.text();
-          console.error("detail LINE API エラー:", lineRes.status, errBody);
+          const err = await lineRes.text();
+          console.log("[detail] LINEエラー:", err);
         }
       }
     }
 
     lastDetailState = state;
-    console.log("detail checked");
-    detailRetrying = false;
+
+    console.log("[detail] checked:", new Date().toISOString());
+
   } catch (e) {
-    console.error("[detail] 予期しないエラー:", e.message);
-    if (e.code) console.error("[detail] エラーコード:", e.code);
-    if (!detailRetrying) {
-      detailRetrying = true;
-      console.log("[detail]", RETRY_DELAY / 1000, "秒後に再試行します");
-      setTimeout(() => {
-        checkDetailPage().finally(() => {
-          detailRetrying = false;
-        });
-      }, RETRY_DELAY);
-    }
+    console.log("[detail] error:", e.message);
   }
 }
 
-checkDetailPage();
-setInterval(checkDetailPage, 15000);
+setInterval(checkDetailPage, 30000);
