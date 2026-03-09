@@ -43,7 +43,7 @@ function isBattleTime() {
 
 /**
  * ページ内の全ボタン（primary も default も）をブロック単位で取得する。
- * 戻り: { 公演日, 公演時間, 詳細リンク, isPrimary }[]
+ * 戻り: { 公演日, 公演時間, 公演タイトル, 詳細リンク, isPrimary }[]
  */
 function parseAllBlocks(html) {
   const items = [];
@@ -51,6 +51,7 @@ function parseAllBlocks(html) {
 
   const dateClassRe = /class="[^"]*block-ticket-article__date[^"]*"[^>]*>([\s\S]*?)<\/\w+>/g;
   const timeClassRe = /class="[^"]*block-ticket-article__time[^"]*"[^>]*>([\s\S]*?)<\/\w+>/g;
+  const titleClassRe = /class="[^"]*block-ticket__title[^"]*"[^>]*>([\s\S]*?)<\/\w+>/g;
 
   const blockStarts = [];
   let dm;
@@ -74,6 +75,9 @@ function parseAllBlocks(html) {
     const timeMatch = timeClassRe.exec(block);
     const 公演時間Raw = timeMatch ? timeMatch[1] : "";
     const 公演時間 = 公演時間Raw.replace(/\s+/g, " ").trim();
+    titleClassRe.lastIndex = 0;
+    const titleMatch = titleClassRe.exec(block);
+    const 公演タイトル = titleMatch ? titleMatch[1].replace(/\s+/g, " ").trim() : "";
 
     const links = [];
     const seenUrls = new Set();
@@ -89,6 +93,7 @@ function parseAllBlocks(html) {
     items.push({
       公演日,
       公演時間,
+      公演タイトル,
       詳細リンク: links,
       isPrimary: hasPrimary,
     });
@@ -226,9 +231,23 @@ function scheduleNextCheck() {
 
 scheduleNextCheck();
 
-// ===== 個ページ監視 =====
-const DETAIL_URL =
-  "https://atom.eplus.jp/sys/main.jsp?prm=U=82:P2=047346:P5=0001:P3=0484:P21=010:P7=13:P6=001:P1=0003:P0=GGWC01:P55=//eplus.jp%2Fsf%2Fdetail%2F0473460001";
+// ===== 個ページ監視（一覧の「最後の button class="button"」のリンクから個別ページへ） =====
+// 最後のボタンは button--default / button--primary で切り替わる。どちらの状態でも同じURLを使う。
+
+/** 一覧HTMLから、最後の詳細ボタンのURLと公演情報を取得。戻り: { url, 公演日, 公演時間, 公演タイトル } or { url: null } */
+function getDetailUrlFromListHtml(html) {
+  const blocks = parseAllBlocks(html); // button--primary も button--default も含むブロック
+  if (blocks.length === 0) return { url: null };
+  const last = blocks[blocks.length - 1];
+  const link = last.詳細リンク && last.詳細リンク[0];
+  const url = link ? link.replace(/&amp;/g, "&").trim() : null;
+  return {
+    url,
+    公演日: last.公演日,
+    公演時間: last.公演時間,
+    公演タイトル: last.公演タイトル || "",
+  };
+}
 
 const DETAIL_FETCH_HEADERS = {
   "User-Agent":
@@ -279,7 +298,19 @@ async function fetchDetailViaList(cookieHeader = undefined) {
     console.error("[detail] 一覧に戻れなかった（HTTP " + listRes.status + "）");
     return { ok: false, status: listRes.status, html: null, errorType: "list_failed" };
   }
-  await listRes.text(); // 読み捨てでセッション確立
+  const listHtml = await listRes.text();
+  const { url: detailUrl, 公演日, 公演時間, 公演タイトル } = getDetailUrlFromListHtml(listHtml);
+  if (!detailUrl) {
+    console.log("[detail] 一覧から最後の詳細ボタンのURLを取得できませんでした");
+    return { ok: false, status: null, html: null, errorType: "no_detail_link" };
+  }
+  console.log(
+    "[detail] 一番最後のボタン:",
+    "block-ticket-article__date=" + 公演日,
+    "block-ticket-article__time=" + 公演時間,
+    "block-ticket__title=" + 公演タイトル
+  );
+  console.log("[detail] 一覧の最後のボタンから個別URL取得 → 取得中");
 
   const cookie = cookieHeader || getCookieHeader(listRes);
   if (!cookie) {
@@ -296,7 +327,7 @@ async function fetchDetailViaList(cookieHeader = undefined) {
   try {
     const detailController = new AbortController();
     const detailTimeout = setTimeout(() => detailController.abort(), TIMEOUT);
-    detailRes = await fetch(DETAIL_URL, {
+    detailRes = await fetch(detailUrl, {
       signal: detailController.signal,
       headers,
       redirect: "follow",
@@ -337,30 +368,8 @@ async function checkDetailPage() {
         await sleep(FIVE_XX_RETRY_WAIT_MS);
       }
 
-      try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), TIMEOUT);
-        const r = await fetch(DETAIL_URL, {
-          signal: controller.signal,
-          headers: { ...DETAIL_FETCH_HEADERS, Referer: url },
-        });
-        clearTimeout(timeout);
-        res = { ok: r.ok, status: r.status, html: await r.text() };
-      } catch (directErr) {
-        res = null;
-        console.log("[detail] 個別ページの取得でタイムアウト。一覧経由で再試行します。", directErr.message);
-      }
-
-      // タイムアウト or 失敗 or エラーページ → 一覧から入り直して1回だけ再試行
-      const needRetry =
-        !res ||
-        !res.ok ||
-        isDetailErrorPage(res && res.html) ||
-        (res && res.html && !res.html.includes("ticketDate"));
-      if (needRetry) {
-        if (res && res.ok) console.log("[detail] エラーページのため、一覧経由で再試行します。");
-        res = await fetchDetailViaList();
-      }
+      // 一覧を取得 → 最後の「詳細」ボタンのURLを取得 → そのURLで個別ページを取得
+      res = await fetchDetailViaList();
 
       const is5xx = res && res.status >= 500;
       if (res && res.ok) break;
@@ -371,6 +380,8 @@ async function checkDetailPage() {
     if (!res || !res.ok) {
       if (res && res.status >= 500) {
         console.log("[detail] 今回のチェックはスキップ、次回の間隔で再試行します（HTTP " + res.status + "）");
+      } else if (res && res.errorType === "no_detail_link") {
+        console.log("[detail] 一覧に詳細ボタンがありません（スキップ）");
       } else if (res && res.errorType) {
         console.error("[detail] タイムアウト復活できませんでした（一覧経由の再試行も失敗）");
       } else {
