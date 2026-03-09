@@ -268,6 +268,9 @@ const DETAIL_HEADERS = {
   "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
   Referer: url,
   "Connection": "keep-alive",
+  "Upgrade-Insecure-Requests": "1",
+  "DNT": "1",
+  ...(cookie ? { Cookie: cookie } : {})
 };
 
 let lastDetailState = null;
@@ -279,10 +282,11 @@ async function checkDetailPage() {
     let html = "";
     let detailUrl = null;
 
+    // アクセス順序: 一覧 → 詳細 → 在庫取得（必ず一覧経由でCookie/セッションを取得し、詳細は直接アクセスしない）
     for (let attempt = 0; attempt < FIVE_XX_RETRY_COUNT; attempt++) {
       if (attempt > 0) {
         console.log(
-          "[detail] 5xx リトライ:",
+          "[detail] 403/5xx のため一覧に戻ってセッション更新し再試行:",
           attempt + 1,
           "/",
           FIVE_XX_RETRY_COUNT,
@@ -293,6 +297,7 @@ async function checkDetailPage() {
         await sleep(FIVE_XX_RETRY_WAIT_MS);
       }
 
+      // 1. 必ず一覧ページに先にアクセス（Cookie/セッション取得）
       const listController = new AbortController();
       const listTimeout = setTimeout(() => listController.abort(), TIMEOUT);
       const listRes = await fetch(url, {
@@ -307,6 +312,7 @@ async function checkDetailPage() {
       }
 
       const listHtml = await listRes.text();
+
       const { url: extractedUrl, onclickValue, 公演日, 公演時間, 公演タイトル } =
         getDetailUrlFromListHtml(listHtml);
 
@@ -321,7 +327,7 @@ async function checkDetailPage() {
       if (detailUrl.includes("sp.atom.eplus.jp")) {
         detailUrl = detailUrl.replace("sp.atom.eplus.jp", "atom.eplus.jp");
       }
-      console.log("[detail] fixed url:", detailUrl);
+      console.log("[detail] fixed url (PC版):", detailUrl);
 
       console.log(
         "[detail] 一番最後のボタン:",
@@ -330,6 +336,7 @@ async function checkDetailPage() {
         "title=" + 公演タイトル
       );
 
+      // 2. 一覧で取得したCookieを詳細リクエストに付与
       let cookie = "";
       if (typeof listRes.headers.getSetCookie === "function") {
         const setCookieList = listRes.headers.getSetCookie();
@@ -341,7 +348,11 @@ async function checkDetailPage() {
         const v = listRes.headers.get("set-cookie");
         if (v) cookie = v.split(";")[0].trim();
       }
+      if (!cookie) {
+        console.log("[detail] 一覧からCookie取得なし（403の可能性）");
+      }
 
+      // 3. 取得したCookieとReferer(一覧URL)で詳細ページにアクセス（直接アクセスしない）
       const detailController = new AbortController();
       const detailTimeout = setTimeout(() => detailController.abort(), TIMEOUT);
       res = await fetch(detailUrl, {
@@ -362,14 +373,17 @@ async function checkDetailPage() {
 
       html = await res.text();
       const is5xx = res.status >= 500;
+      const is403 = res.status === 403;
       if (res.ok) break;
-      if (is5xx && attempt < FIVE_XX_RETRY_COUNT - 1) continue;
+      if ((is403 || is5xx) && attempt < FIVE_XX_RETRY_COUNT - 1) continue;
       break;
     }
 
     if (!res.ok) {
       if (res.status >= 500) {
         console.log("[detail] 今回スキップ、次回の間隔で再試行します（HTTP " + res.status + "）");
+      } else if (res.status === 403) {
+        console.log("[detail] 403 セッション切れの可能性。次回一覧経由で再試行します。");
       } else {
         console.log("[detail] fetch failed:", res.status);
       }
