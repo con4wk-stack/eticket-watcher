@@ -266,6 +266,8 @@ function getCookieHeader(res) {
     list = res.headers.getSetCookie();
   } else if (res.headers.raw && Array.isArray(res.headers.raw["set-cookie"])) {
     list = res.headers.raw["set-cookie"];
+  } else if (res.headers.get && res.headers.get("set-cookie")) {
+    list = [res.headers.get("set-cookie")];
   }
   if (list.length === 0) return undefined;
   return list
@@ -313,8 +315,11 @@ async function fetchDetailViaList(cookieHeader = undefined) {
   console.log("[detail] 一覧の最後のボタンから個別URL取得 → 取得中");
 
   const cookie = cookieHeader || getCookieHeader(listRes);
+  const cookieCount = cookie ? cookie.split(";").filter((s) => s.trim()).length : 0;
   if (!cookie) {
     console.log("[detail] 一覧からCookieを取得できませんでした（403の原因の可能性）");
+  } else {
+    console.log("[detail] 一覧からCookie " + cookieCount + " 件取得");
   }
   const headers = {
     ...DETAIL_FETCH_HEADERS,
@@ -338,7 +343,36 @@ async function fetchDetailViaList(cookieHeader = undefined) {
     return { ok: false, status: null, html: null, errorType: "detail_timeout" };
   }
 
-  const html = await detailRes.text();
+  let html = await detailRes.text();
+
+  if (!detailRes.ok && detailRes.status === 403) {
+    console.log("[detail] 403のため、リダイレクト経由でCookie取得を試行します");
+    const redirectRes = await fetch(detailUrl, {
+      headers: { ...DETAIL_FETCH_HEADERS, Referer: url },
+      redirect: "manual",
+    }).catch(() => null);
+    if (redirectRes && (redirectRes.status === 301 || redirectRes.status === 302 || redirectRes.status === 303)) {
+      const redirectCookie = getCookieHeader(redirectRes);
+      const location = redirectRes.headers.get("location");
+      if (redirectCookie && location) {
+        const fullUrl = location.startsWith("http") ? location : new URL(location, detailUrl).href;
+        const retryRes = await fetch(fullUrl, {
+          headers: {
+            ...DETAIL_FETCH_HEADERS,
+            Referer: url,
+            Cookie: redirectCookie,
+          },
+          redirect: "follow",
+        }).catch(() => null);
+        if (retryRes && retryRes.ok) {
+          html = await retryRes.text();
+          detailRes = { ok: true, status: retryRes.status };
+          return { ok: true, status: detailRes.status, html };
+        }
+      }
+    }
+  }
+
   if (!detailRes.ok) {
     console.error("[detail] 一覧から個別ページに入れなかった（HTTP " + detailRes.status + "）");
     if (detailRes.status === 403) {
