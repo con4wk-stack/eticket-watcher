@@ -4,6 +4,11 @@ import express from "express";
 const url = "https://eplus.jp/sf/detail/0473460001";
 const LINE_TOKEN = "53HSL37fngc+EuTIdX2tBlWHdwb4evtfo1ZRLb1XK1uETtS9FeBOLqHVCUQvO7YVssWAI/W1NfQ8yUPVIuQFY7425HbkBwzLmj2Ljt7zT0xcNhKgcNj/P5C631nktl1O44WQb2m+JLWQ/lF+CYUdxQdB04t89/1O/w1cDnyilFU=";
 const LINE_USER_ID = "C755fb6ffbd64b76818fd0a4dac5b130f";
+// Chatwork（LINE上限時用）。環境変数 CHATWORK_TOKEN / CHATWORK_ROOM_ID か、下記に直接指定。空なら通知しない
+const CHATWORK_TOKEN = process.env.CHATWORK_TOKEN || "f03fec5446114f0da54c391afcbab29e";  // ここにAPIトークンを入れても可
+const CHATWORK_ROOM_ID = process.env.CHATWORK_ROOM_ID || "https://www.chatwork.com/#!rid425373870"; // ここにルームIDを入れても可
+
+
 
 const NORMAL_INTERVAL = 30000;
 const BATTLE_INTERVAL = 15000;
@@ -23,6 +28,14 @@ app.post("/webhook", (req, res) => {
 });
 app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
 
+const nodeMajor = parseInt(process.versions.node.split(".")[0], 10);
+if (nodeMajor < 18) {
+  console.warn(
+    "[警告] Node " +
+      process.version +
+      " です。詳細ページ取得(Playwright)は Node 18 以上を推奨します。https://nodejs.org/ で LTS をインストールしてください。"
+  );
+}
 console.log("Watcher started:", new Date().toISOString());
 
 let retrying = false;
@@ -121,6 +134,28 @@ function buildNotificationMessage(item, pageUrl) {
   return lines.join("\n");
 }
 
+/** Chatwork にメッセージを送信（TOKEN と ROOM_ID が設定されている場合のみ） */
+async function sendChatworkMessage(text) {
+  if (!CHATWORK_TOKEN || !CHATWORK_ROOM_ID) return;
+  const res = await fetch(
+    `https://api.chatwork.com/v2/rooms/${CHATWORK_ROOM_ID}/messages`,
+    {
+      method: "POST",
+      headers: {
+        "X-ChatWorkToken": CHATWORK_TOKEN,
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({ body: text }).toString(),
+    }
+  );
+  if (res.ok) {
+    console.log("Chatwork通知送信 OK");
+  } else {
+    const errBody = await res.text();
+    console.error("Chatwork API エラー:", res.status, errBody);
+  }
+}
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function checkPage() {
@@ -168,12 +203,12 @@ async function checkPage() {
 
       // default → primary になったときだけ通知（初回も wasPrimary が undefined なので通知）
       if (block.isPrimary && wasPrimary !== true) {
-        if (LINE_TOKEN && LINE_USER_ID) {
-          const message = buildNotificationMessage(
-            { 公演日: block.公演日, 公演時間: block.公演時間, 詳細リンク: block.詳細リンク },
-            url
-          );
+        const message = buildNotificationMessage(
+          { 公演日: block.公演日, 公演時間: block.公演時間, 詳細リンク: block.詳細リンク },
+          url
+        );
 
+        if (LINE_TOKEN && LINE_USER_ID) {
           const lineRes = await fetch("https://api.line.me/v2/bot/message/push", {
             method: "POST",
             headers: {
@@ -193,6 +228,7 @@ async function checkPage() {
             console.error("LINE API エラー:", lineRes.status, errBody);
           }
         }
+        await sendChatworkMessage(message);
       }
 
       lastButtonState.set(key, block.isPrimary);
@@ -275,9 +311,35 @@ const DETAIL_HEADERS = {
 let lastDetailState = null;
 let detailRetrying = false;
 
+/**
+ * Playwright で一覧→詳細の順に開き、詳細ページの HTML を取得（403回避）
+ * Node 18 以上推奨（Playwright の要件）
+ */
+async function fetchDetailHtml(listUrl, detailUrl) {
+  const { chromium } = await import("playwright");
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const context = await browser.newContext({
+      userAgent: USER_AGENT,
+    });
+    const page = await context.newPage();
+    await page.goto(listUrl, {
+      waitUntil: "domcontentloaded",
+      timeout: TIMEOUT,
+    });
+    await page.goto(detailUrl, {
+      waitUntil: "domcontentloaded",
+      timeout: TIMEOUT,
+    });
+    const html = await page.content();
+    return html;
+  } finally {
+    await browser.close();
+  }
+}
+
 async function checkDetailPage() {
   try {
-    let res;
     let html = "";
     let detailUrl = null;
 
@@ -335,64 +397,21 @@ async function checkDetailPage() {
         "title=" + 公演タイトル
       );
 
-      // 2. 一覧で取得したCookieを詳細リクエストに付与
-      let cookie = "";
-      if (typeof listRes.headers.getSetCookie === "function") {
-        const setCookieList = listRes.headers.getSetCookie();
-        if (setCookieList && setCookieList.length > 0) {
-          cookie = setCookieList.map((s) => s.split(";")[0].trim()).join("; ");
-        }
+      // 3. Playwright で一覧→詳細の順に開き HTML 取得（fetch 403 回避）
+      try {
+        html = await fetchDetailHtml(url, detailUrl);
+        console.log("[detail] status: 200 (Playwright)");
+        break;
+      } catch (e) {
+        console.log("[detail] Playwright error:", e.message);
+        if (attempt < FIVE_XX_RETRY_COUNT - 1) continue;
+        html = "";
+        break;
       }
-      if (!cookie && listRes.headers.get) {
-        const v = listRes.headers.get("set-cookie");
-        if (v) cookie = v.split(";")[0].trim();
-      }
-      if (!cookie) {
-        console.log("[detail] 一覧からCookie取得なし（403の可能性）");
-      }
-
-      // 3. 取得したCookieとReferer(一覧URL)で詳細ページにアクセス（直接アクセスしない）
-      const detailController = new AbortController();
-      const detailTimeout = setTimeout(() => detailController.abort(), TIMEOUT);
-      const headers = {
-        "User-Agent": USER_AGENT,
-        "Accept":
-        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
-        Referer: url,
-        "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1",
-        "DNT": "1",
-      };
-      
-      if (cookie) {
-        headers["Cookie"] = cookie;
-      }
-      
-      res = await fetch(detailUrl, {
-        signal: detailController.signal,
-        headers: headers
-      });
-      clearTimeout(detailTimeout);
-
-      console.log("[detail] status:", res.status);
-
-      html = await res.text();
-      const is5xx = res.status >= 500;
-      const is403 = res.status === 403;
-      if (res.ok) break;
-      if ((is403 || is5xx) && attempt < FIVE_XX_RETRY_COUNT - 1) continue;
-      break;
     }
 
-    if (!res.ok) {
-      if (res.status >= 500) {
-        console.log("[detail] 今回スキップ、次回の間隔で再試行します（HTTP " + res.status + "）");
-      } else if (res.status === 403) {
-        console.log("[detail] 403 セッション切れの可能性。次回一覧経由で再試行します。");
-      } else {
-        console.log("[detail] fetch failed:", res.status);
-      }
+    if (!html) {
+      console.log("[detail] 詳細ページの取得に失敗しました。次回の間隔で再試行します。");
       return;
     }
 
@@ -437,7 +456,6 @@ async function checkDetailPage() {
       ].join("\n");
 
       if (LINE_TOKEN && LINE_USER_ID) {
-
         const lineRes = await fetch("https://api.line.me/v2/bot/message/push", {
           method: "POST",
           headers: {
@@ -457,6 +475,7 @@ async function checkDetailPage() {
           console.log("[detail] LINEエラー:", err);
         }
       }
+      await sendChatworkMessage(message);
     }
 
     lastDetailState = state;
