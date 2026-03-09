@@ -270,7 +270,6 @@ const DETAIL_HEADERS = {
   "Connection": "keep-alive",
   "Upgrade-Insecure-Requests": "1",
   "DNT": "1",
-  ...(cookie ? { Cookie: cookie } : {})
 };
 
 let lastDetailState = null;
@@ -355,17 +354,24 @@ async function checkDetailPage() {
       // 3. 取得したCookieとReferer(一覧URL)で詳細ページにアクセス（直接アクセスしない）
       const detailController = new AbortController();
       const detailTimeout = setTimeout(() => detailController.abort(), TIMEOUT);
+      const headers = {
+        "User-Agent": USER_AGENT,
+        "Accept":
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+        Referer: url,
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "DNT": "1",
+      };
+      
+      if (cookie) {
+        headers["Cookie"] = cookie;
+      }
+      
       res = await fetch(detailUrl, {
         signal: detailController.signal,
-        headers: {
-          "User-Agent": USER_AGENT,
-          "Accept":
-            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-          "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
-          Referer: url,
-          "Connection": "keep-alive",
-          Cookie: cookie,
-        },
+        headers: headers
       });
       clearTimeout(detailTimeout);
 
@@ -471,5 +477,5 @@ async function checkDetailPage() {
   }
 }
 
-checkDetailPage();
-setInterval(checkDetailPage, 30000);
+checkDetailPage().catch((e) => console.error("[detail] startup error:", e.message));
+setInterval(() => checkDetailPage().catch((e) => console.error("[detail] interval error:", e.message)), 30000);
