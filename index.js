@@ -231,16 +231,25 @@ const DETAIL_URL =
   "https://atom.eplus.jp/sys/main.jsp?prm=U=82:P2=047346:P5=0001:P3=0484:P21=010:P7=13:P6=001:P1=0003:P0=GGWC01:P55=//eplus.jp%2Fsf%2Fdetail%2F0473460001";
 
 const DETAIL_FETCH_HEADERS = {
-  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "User-Agent":
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  Accept:
+    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+  "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
 };
 
 let lastDetailState = null;
 
-/** レスポンスから Cookie ヘッダ用の文字列を組み立てる */
+/** レスポンスから Cookie ヘッダ用の文字列を組み立てる（node-fetch v3 / getSetCookie 対応） */
 function getCookieHeader(res) {
-  const setCookie = res.headers.raw && res.headers.raw["set-cookie"];
-  if (!Array.isArray(setCookie) || setCookie.length === 0) return undefined;
-  return setCookie
+  let list = [];
+  if (typeof res.headers.getSetCookie === "function") {
+    list = res.headers.getSetCookie();
+  } else if (res.headers.raw && Array.isArray(res.headers.raw["set-cookie"])) {
+    list = res.headers.raw["set-cookie"];
+  }
+  if (list.length === 0) return undefined;
+  return list
     .map((s) => s.split(";")[0].trim())
     .filter(Boolean)
     .join("; ");
@@ -273,7 +282,14 @@ async function fetchDetailViaList(cookieHeader = undefined) {
   await listRes.text(); // 読み捨てでセッション確立
 
   const cookie = cookieHeader || getCookieHeader(listRes);
-  const headers = { ...DETAIL_FETCH_HEADERS, Referer: url };
+  if (!cookie) {
+    console.log("[detail] 一覧からCookieを取得できませんでした（403の原因の可能性）");
+  }
+  const headers = {
+    ...DETAIL_FETCH_HEADERS,
+    Referer: url,
+    Origin: new URL(url).origin,
+  };
   if (cookie) headers.Cookie = cookie;
 
   let detailRes;
@@ -294,6 +310,9 @@ async function fetchDetailViaList(cookieHeader = undefined) {
   const html = await detailRes.text();
   if (!detailRes.ok) {
     console.error("[detail] 一覧から個別ページに入れなかった（HTTP " + detailRes.status + "）");
+    if (detailRes.status === 403) {
+      console.log("[detail] 403の原因候補: Cookie未取得、Referer/Origin拒否、アクセス制限。一覧と個別が別ドメインのためCookieが渡らない場合があります。");
+    }
     return { ok: false, status: detailRes.status, html: null, errorType: "detail_failed" };
   }
   return { ok: true, status: detailRes.status, html };
