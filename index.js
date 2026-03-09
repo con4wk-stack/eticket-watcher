@@ -231,19 +231,30 @@ function scheduleNextCheck() {
 
 scheduleNextCheck();
 
-// ===== 個ページ監視（一覧の最後のボタンのURLから個別ページを取得） =====
-/** 一覧HTMLから、最後の詳細ボタンのURLと公演情報を取得 */
+// ===== 個ページ監視（一覧の最後のボタンの onclick から詳細URLを取得） =====
+/**
+ * 一覧HTMLから、最後の詳細ボタンの onclick 内 window.location.href='URL' を抽出。
+ * 通知仕様は変更しない（通知URL＝一覧ページのみ。詳細URLは内部チェック専用）。
+ */
 function getDetailUrlFromListHtml(html) {
   const blocks = parseAllBlocks(html);
-  if (blocks.length === 0) return { url: null };
-  const last = blocks[blocks.length - 1];
-  const link = last.詳細リンク && last.詳細リンク[0];
-  const detailUrl = link ? link.replace(/&amp;/g, "&").trim() : null;
+  const last = blocks.length > 0 ? blocks[blocks.length - 1] : null;
+
+  let onclickValue = null;
+  let detailUrl = null;
+  const onclickRe = /onclick="([^"]*?window\.location\.href='([^']+)'[^"]*)"/g;
+  let m;
+  while ((m = onclickRe.exec(html)) !== null) {
+    onclickValue = m[1];
+    detailUrl = m[2].replace(/&amp;/g, "&").trim();
+  }
+
   return {
     url: detailUrl,
-    公演日: last.公演日,
-    公演時間: last.公演時間,
-    公演タイトル: last.公演タイトル || "",
+    onclickValue: onclickValue || undefined,
+    公演日: last ? last.公演日 : "",
+    公演時間: last ? last.公演時間 : "",
+    公演タイトル: last ? last.公演タイトル || "" : "",
   };
 }
 
@@ -300,7 +311,8 @@ async function checkDetailPage() {
       }
 
       const listHtml = await listRes.text();
-      const { url: extractedUrl, 公演日, 公演時間, 公演タイトル } = getDetailUrlFromListHtml(listHtml);
+      const { url: extractedUrl, onclickValue, 公演日, 公演時間, 公演タイトル } =
+        getDetailUrlFromListHtml(listHtml);
 
       if (!extractedUrl) {
         console.log("[detail] 一覧から最後の詳細ボタンのURLを取得できませんでした");
@@ -308,6 +320,8 @@ async function checkDetailPage() {
       }
 
       detailUrl = extractedUrl;
+      console.log("[detail] onclick:", onclickValue ?? "(なし)");
+      console.log("[detail] extracted url:", detailUrl);
       console.log(
         "[detail] 一番最後のボタン:",
         "date=" + 公演日,
