@@ -30,14 +30,6 @@ app.post("/webhook", (req, res) => {
 });
 app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
 
-const nodeMajor = parseInt(process.versions.node.split(".")[0], 10);
-if (nodeMajor < 18) {
-  console.warn(
-    "[警告] Node " +
-      process.version +
-      " です。詳細ページ取得(Playwright)は Node 18 以上を推奨します。https://nodejs.org/ で LTS をインストールしてください。"
-  );
-}
 console.log("Watcher started:", new Date().toISOString());
 
 let retrying = false;
@@ -270,7 +262,7 @@ function scheduleNextCheck() {
 
 scheduleNextCheck();
 
-// ===== 個ページ監視（一覧の最後のボタンの onclick から詳細URLを取得） =====
+// ===== 個ページ監視（一覧の「最後のボタン」をクリックして詳細へ遷移） =====
 /**
  * 一覧HTMLから、最後の詳細ボタンの onclick 内 window.location.href='URL' を抽出。
  * 通知仕様は変更しない（通知URL＝一覧ページのみ。詳細URLは内部チェック専用）。
@@ -313,55 +305,47 @@ const DETAIL_HEADERS = {
 
 let lastDetailState = null;
 let detailRetrying = false;
-/** Playwright が使えない場合、当日引換券チェックをスキップ（初回だけログ、以降は無視） */
-let detailPlaywrightUnavailable = false;
-let detailPlaywrightLogged = false;
 
 /**
- * Playwright で一覧→詳細の順に開き、詳細ページの HTML を取得（403回避）
- * Node 18 以上推奨（Playwright の要件）
+ * 一覧レスポンスで受け取った Cookie を次のリクエスト用の文字列にまとめる
  */
-async function fetchDetailHtml(listUrl, detailUrl) {
-  let playwright;
-  try {
-    playwright = await import("playwright");
-  } catch (e) {
-    if (!detailPlaywrightLogged) {
-      detailPlaywrightLogged = true;
-      console.log("[detail] Playwright が利用できないため当日引換券チェックはスキップします（入れたら自動で有効になります）");
-    }
-    throw e;
+function getCookieHeaderFromResponse(listRes) {
+  const setCookie = listRes.headers.get("set-cookie") ?? listRes.headers.get("Set-Cookie");
+  if (setCookie) return setCookie;
+  if (typeof listRes.headers.getSetCookie === "function") {
+    return listRes.headers.getSetCookie().join("; ");
   }
-  const { chromium } = playwright;
-  const browser = await chromium.launch({ headless: true });
-  try {
-    const context = await browser.newContext({
-      userAgent: USER_AGENT,
-    });
-    const page = await context.newPage();
-    await page.goto(listUrl, {
-      waitUntil: "domcontentloaded",
-      timeout: TIMEOUT,
-    });
-    await page.goto(detailUrl, {
-      waitUntil: "domcontentloaded",
-      timeout: TIMEOUT,
-    });
-    const html = await page.content();
-    return html;
-  } finally {
-    await browser.close();
+  return "";
+}
+
+/**
+ * fetch で一覧→詳細の順にアクセス（一覧で取得した Cookie + Referer で「ボタンクリック相当」の遷移）
+ */
+async function fetchDetailHtmlWithFetch(listUrl, detailUrl, listRes) {
+  const cookieHeader = getCookieHeaderFromResponse(listRes);
+  const headers = { ...DETAIL_HEADERS, Referer: listUrl };
+  if (cookieHeader) headers.Cookie = cookieHeader;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), TIMEOUT);
+  const res = await fetch(detailUrl, {
+    signal: controller.signal,
+    headers,
+  });
+  clearTimeout(timeout);
+
+  if (!res.ok) {
+    throw new Error(`detail fetch ${res.status}`);
   }
+  return res.text();
 }
 
 async function checkDetailPage() {
   try {
-    if (detailPlaywrightUnavailable) return;
-
     let html = "";
     let detailUrl = null;
 
-    // アクセス順序: 一覧 → 詳細 → 在庫取得（必ず一覧経由でCookie/セッションを取得し、詳細は直接アクセスしない）
+    // アクセス順序: 一覧 → 詳細（一覧で Cookie/Referer を取得し、詳細は「クリック相当」で fetch）
     for (let attempt = 0; attempt < FIVE_XX_RETRY_COUNT; attempt++) {
       if (attempt > 0) {
         console.log(
@@ -376,7 +360,7 @@ async function checkDetailPage() {
         await sleep(FIVE_XX_RETRY_WAIT_MS);
       }
 
-      // 1. 必ず一覧ページに先にアクセス（Cookie/セッション取得）
+      // 1. 一覧ページにアクセス（Cookie/セッション取得）
       const listController = new AbortController();
       const listTimeout = setTimeout(() => listController.abort(), TIMEOUT);
       const listRes = await fetch(url, {
@@ -409,22 +393,19 @@ async function checkDetailPage() {
       console.log("[detail] fixed url (PC版):", detailUrl);
 
       console.log(
-        "[detail] 一番最後のボタン:",
+        "[detail] 一番最後のボタン（クリック相当で遷移）:",
         "date=" + 公演日,
         "time=" + 公演時間,
         "title=" + 公演タイトル
       );
 
-      // 3. Playwright で一覧→詳細の順に開き HTML 取得（fetch 403 回避）
+      // 2. 一覧の Cookie + Referer で詳細ページを fetch（ボタンクリック相当）
       try {
-        html = await fetchDetailHtml(url, detailUrl);
-        console.log("[detail] status: 200 (Playwright)");
+        html = await fetchDetailHtmlWithFetch(url, detailUrl, listRes);
+        console.log("[detail] status: 200 (fetch)");
         break;
       } catch (e) {
-        if (e.code === "ERR_MODULE_NOT_FOUND" || /Cannot find package 'playwright'/.test(e.message)) {
-          detailPlaywrightUnavailable = true;
-        }
-        if (!detailPlaywrightUnavailable) console.log("[detail] Playwright error:", e.message);
+        console.log("[detail] fetch error:", e.message);
         if (attempt < FIVE_XX_RETRY_COUNT - 1) continue;
         html = "";
         break;
