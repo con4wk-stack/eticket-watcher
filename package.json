@@ -7,11 +7,14 @@
   },
   "scripts": {
     "start": "node index.js",
-    "postinstall": "node scripts/install-playwright.js"
+    "postinstall": "cross-env PLAYWRIGHT_BROWSERS_PATH=./playwright-browsers npx playwright install chromium-headless-shell"
   },
   "dependencies": {
     "express": "^4.21.0",
     "node-fetch": "^3.3.2",
     "playwright": "^1.49.0"
+  },
+  "devDependencies": {
+    "cross-env": "^7.0.3"
   }
 }
