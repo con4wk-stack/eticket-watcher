@@ -1,6 +1,8 @@
 import fetch from "node-fetch";
 import express from "express";
 
+process.env.PLAYWRIGHT_BROWSERS_PATH = "./playwright-browsers";
+
 let browser = null;
 
 const url = "https://eplus.jp/sf/detail/0473460001";
@@ -374,9 +376,10 @@ async function fetchDetailHtmlWithPlaywright(listUrl) {
       headless: true,
       args: [
         "--no-sandbox",
-        "--disable-setuid-sandbox"
-      ],
-      channel: "chromium"
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu"
+      ]
     });
   }
   let context;
