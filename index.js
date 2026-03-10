@@ -169,53 +169,61 @@ async function sendChatworkMessage(text) {
   }
 }
 
-/** 起動時（デプロイ完了時）に1回だけ送る通知（現在の一覧情報を送る） */
+/** 起動時（デプロイ完了時）に1回だけ送る通知（現在の一覧を公演ごとに送信） */
 async function sendStartupTestNotification() {
-  let message = "🔔 Watcher が起動しました（現在の一覧）\n\n";
   try {
     const res = await fetch(url, {
       headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
     });
-    if (res.ok) {
-      const html = await res.text();
-      const blocks = parseAllBlocks(html);
-      const parts = blocks.map((b) =>
-        buildNotificationMessage(
-          { 公演日: b.公演日, 公演時間: b.公演時間, 詳細リンク: b.詳細リンク },
-          url
-        )
+    if (!res.ok) {
+      const fallback = "一覧の取得に失敗しました。\n\nページURL\n" + url;
+      if (LINE_TOKEN && LINE_USER_ID) {
+        try {
+          await fetch("https://api.line.me/v2/bot/message/push", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${LINE_TOKEN}` },
+            body: JSON.stringify({ to: LINE_USER_ID, messages: [{ type: "text", text: fallback }] }),
+          });
+        } catch (e) {}
+      }
+      await sendChatworkMessage(fallback);
+      return;
+    }
+    const html = await res.text();
+    const blocks = parseAllBlocks(html);
+    for (const b of blocks) {
+      const message = buildNotificationMessage(
+        { 公演日: b.公演日, 公演時間: b.公演時間, 詳細リンク: b.詳細リンク },
+        url
       );
-      message += parts.join("\n\n");
-    } else {
-      message += "一覧の取得に失敗しました。\n\nページURL\n" + url;
+      if (LINE_TOKEN && LINE_USER_ID) {
+        try {
+          const lineRes = await fetch("https://api.line.me/v2/bot/message/push", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${LINE_TOKEN}` },
+            body: JSON.stringify({ to: LINE_USER_ID, messages: [{ type: "text", text: message }] }),
+          });
+          if (lineRes.ok) console.log("起動通知: LINE送信 OK");
+          else console.log("起動通知: LINEエラー", await lineRes.text());
+        } catch (e) {
+          console.log("起動通知: LINE送信失敗", e.message);
+        }
+      }
+      await sendChatworkMessage(message);
     }
   } catch (e) {
-    message += "一覧の取得に失敗しました。\n\nページURL\n" + url;
-  }
-  if (!message.includes("ページURL")) {
-    message += "\n\nページURL\n" + url;
-  }
-
-  if (LINE_TOKEN && LINE_USER_ID) {
-    try {
-      const lineRes = await fetch("https://api.line.me/v2/bot/message/push", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${LINE_TOKEN}`,
-        },
-        body: JSON.stringify({
-          to: LINE_USER_ID,
-          messages: [{ type: "text", text: message }],
-        }),
-      });
-      if (lineRes.ok) console.log("起動通知: LINE送信 OK");
-      else console.log("起動通知: LINEエラー", await lineRes.text());
-    } catch (e) {
-      console.log("起動通知: LINE送信失敗", e.message);
+    const fallback = "一覧の取得に失敗しました。\n\nページURL\n" + url;
+    if (LINE_TOKEN && LINE_USER_ID) {
+      try {
+        await fetch("https://api.line.me/v2/bot/message/push", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${LINE_TOKEN}` },
+          body: JSON.stringify({ to: LINE_USER_ID, messages: [{ type: "text", text: fallback }] }),
+        });
+      } catch (err) {}
     }
+    await sendChatworkMessage(fallback);
   }
-  await sendChatworkMessage(message);
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -387,6 +395,7 @@ async function fetchDetailHtmlWithPlaywright(listUrl) {
     context = await browser.newContext({ userAgent: USER_AGENT });
     const page = await context.newPage();
     await page.goto(listUrl, { waitUntil: "domcontentloaded", timeout: TIMEOUT });
+    await page.waitForLoadState("load", { timeout: 10000 }).catch(() => {});
     let listHtml = await page.content();
     listHtml = listHtml.slice(0, MAX_HTML_SIZE);
 
@@ -398,6 +407,8 @@ async function fetchDetailHtmlWithPlaywright(listUrl) {
     // クリック後のナビゲーション待ちを延長（詳細ページが遅いため noWaitAfter で自前で待つ）
     await buttons[buttons.length - 1].click({ timeout: 10000, noWaitAfter: true });
     await page.waitForLoadState("domcontentloaded", { timeout: DETAIL_NAV_TIMEOUT });
+    await page.waitForLoadState("load", { timeout: 10000 }).catch(() => {});
+    await sleep(1500); // クライアント描画の落ち着き待ち（navigating エラー回避）
     let detailHtml = await page.content();
     detailHtml = detailHtml.slice(0, MAX_HTML_SIZE);
     await page.close();
