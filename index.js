@@ -321,10 +321,7 @@ async function fetchListHtmlWithLogin(pageUrl, memberId, password) {
         } catch (_) {}
       }
 
-      // ログイン後は画面が切り替わるので、遷移完了まで待つ
-      await page.waitForLoadState("domcontentloaded", { timeout: 30000 }).catch(() => {});
-      await page.waitForLoadState("load", { timeout: 30000 }).catch(() => {});
-      await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {});
+      await page.waitForLoadState("load", { timeout: 15000 }).catch(() => {});
       await sleep(3000);
     }
 
@@ -333,6 +330,11 @@ async function fetchListHtmlWithLogin(pageUrl, memberId, password) {
     return html;
   } catch (e) {
     await context.close().catch(() => {});
+    if (/timeout|Timeout|exceeded/i.test(e.message)) {
+      console.log(
+        "[login] 接続がタイムアウトしました。Render 等のクラウドからは onlineticket がブロックされている可能性があります。自宅PCや Raspberry Pi で「node index.js」を実行するとつながることが多いです。"
+      );
+    }
     throw e;
   }
 }
