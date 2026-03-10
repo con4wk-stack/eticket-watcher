@@ -1,11 +1,5 @@
 import fetch from "node-fetch";
 import express from "express";
-import path from "path";
-
-// Render などでビルド時に入れたブラウザをプロジェクト内から参照（起動時に一度だけ設定）
-if (!process.env.PLAYWRIGHT_BROWSERS_PATH) {
-  process.env.PLAYWRIGHT_BROWSERS_PATH = path.join(process.cwd(), "playwright-browsers");
-}
 
 let browser = null;
 
@@ -175,7 +169,7 @@ async function sendChatworkMessage(text) {
 
 /** 起動時（デプロイ完了時）に1回だけ送る通知（現在の一覧情報を送る） */
 async function sendStartupTestNotification() {
-  const lines = ["🔔 Watcher が起動しました（現在の一覧）", ""];
+  let message = "🔔 Watcher が起動しました（現在の一覧）\n\n";
   try {
     const res = await fetch(url, {
       headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
@@ -183,19 +177,22 @@ async function sendStartupTestNotification() {
     if (res.ok) {
       const html = await res.text();
       const blocks = parseAllBlocks(html);
-      for (const b of blocks) {
-        lines.push(`公演日：${b.公演日}`);
-        lines.push(`${b.公演時間 || "—"} ${b.isPrimary ? "購入可" : "売切"}`);
-        if (b.詳細リンク.length) lines.push(b.詳細リンク[0]);
-        lines.push("");
-      }
+      const parts = blocks.map((b) =>
+        buildNotificationMessage(
+          { 公演日: b.公演日, 公演時間: b.公演時間, 詳細リンク: b.詳細リンク },
+          url
+        )
+      );
+      message += parts.join("\n\n");
+    } else {
+      message += "一覧の取得に失敗しました。\n\nページURL\n" + url;
     }
   } catch (e) {
-    lines.push("一覧の取得に失敗しました。");
+    message += "一覧の取得に失敗しました。\n\nページURL\n" + url;
   }
-  lines.push("ページURL");
-  lines.push(url);
-  const message = lines.join("\n");
+  if (!message.includes("ページURL")) {
+    message += "\n\nページURL\n" + url;
+  }
 
   if (LINE_TOKEN && LINE_USER_ID) {
     try {
@@ -364,29 +361,21 @@ const USER_AGENT =
 let lastDetailState = null;
 let detailRetrying = false;
 
-const CHROMIUM_LAUNCH_ARGS = [
-  "--no-sandbox",
-  "--disable-setuid-sandbox",
-  "--disable-dev-shm-usage",
-  "--disable-gpu",
-  "--no-zygote",
-  "--single-process"
-];
-
 const MAX_HTML_SIZE = 400000;
 
 /**
  * Playwright で一覧を開き、最後の「詳細」ボタンをクリックして遷移し、詳細ページの HTML を取得。
  * ログ用に一覧 HTML も返す。
- * （動的 import にすることで PLAYWRIGHT_BROWSERS_PATH を効かせ、Render で正しいパスを参照する）
  */
 async function fetchDetailHtmlWithPlaywright(listUrl) {
-  process.env.PLAYWRIGHT_BROWSERS_PATH = process.env.PLAYWRIGHT_BROWSERS_PATH || path.join(process.cwd(), "playwright-browsers");
   const { chromium } = await import("playwright");
   if (!browser) {
     browser = await chromium.launch({
       headless: true,
-      args: CHROMIUM_LAUNCH_ARGS
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox"
+      ]
     });
   }
   let context;
