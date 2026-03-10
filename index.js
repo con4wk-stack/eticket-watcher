@@ -4,6 +4,7 @@ import express from "express";
 process.env.PLAYWRIGHT_BROWSERS_PATH = "./playwright-browsers";
 
 let browser = null;
+let sharedContext = null; // 監視ループで再利用（browser とあわせて1回だけ起動）
 
 // onlineticket（FCサイト）: url＝一覧ページ。ここを開いて onclick で詳細へ遷移してから監視
 const url = process.env.WATCH_URL || "https://w1.onlineticket.jp/sf/tkt18/detail/0473460001?P6=464";
@@ -24,7 +25,7 @@ const NORMAL_INTERVAL = 30000;
 const BATTLE_INTERVAL = 15000;
 const RETRY_DELAY = 5000;
 const TIMEOUT = 15000;
-const LOGIN_TIMEOUT = 90000; // ログイン・ページ読み込み待ち（90秒。Render 等クラウドからは遅い場合あり）
+const LOGIN_TIMEOUT = 120000; // ログイン・ページ読み込み待ち（クラウド環境向け 120秒）
 const FIVE_XX_RETRY_COUNT = 3;   // 5xx 時の同一チェック内リトライ回数
 const FIVE_XX_RETRY_WAIT_MS = 15000; // 5xx リトライまでの待機（ミリ秒）
 
@@ -48,9 +49,8 @@ app.listen(PORT, async () => {
 
 // Render などでサービス停止時（SIGTERM）にブラウザを閉じてから終了する
 process.on("SIGTERM", async () => {
-  if (browser) {
-    await browser.close().catch(() => {});
-  }
+  if (sharedContext) await sharedContext.close().catch(() => {});
+  if (browser) await browser.close().catch(() => {});
   process.exit(0);
 });
 
@@ -254,21 +254,28 @@ async function fetchListHtmlWithLogin(pageUrl, memberId, password) {
   if (!browser) {
     browser = await chromium.launch({
       headless: true,
-      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--disable-blink-features=AutomationControlled",
+      ],
     });
+    sharedContext = await browser.newContext({ userAgent: USER_AGENT });
   }
-  const context = await browser.newContext({ userAgent: USER_AGENT });
+  const context = sharedContext;
   const page = await context.newPage();
   try {
-    // 一覧ページ（url）を開いてから onclick で詳細へ遷移
-    await page.goto(pageUrl, { waitUntil: "commit", timeout: 90000 });
-    await page.waitForLoadState("domcontentloaded", { timeout: 60000 }).catch(() => {});
-    await page.waitForLoadState("load", { timeout: 30000 }).catch(() => {});
+    // 一覧ページ（url）を開いてから onclick で詳細へ遷移（domcontentloaded + networkidle のみ、load は使わない）
+    await page.goto(pageUrl, { waitUntil: "domcontentloaded", timeout: LOGIN_TIMEOUT });
+    await page.waitForLoadState("networkidle", { timeout: 60000 }).catch(() => {});
     await sleep(2000);
     const buttons = await page.$$('button[onclick*="window.location.href"]');
     if (buttons.length > 0) {
       await buttons[buttons.length - 1].click();
-      await page.waitForLoadState("load", { timeout: 30000 }).catch(() => {});
+      await page.waitForLoadState("domcontentloaded", { timeout: 60000 }).catch(() => {});
+      await page.waitForLoadState("networkidle", { timeout: 30000 }).catch(() => {});
       await sleep(2000);
     }
 
@@ -321,15 +328,16 @@ async function fetchListHtmlWithLogin(pageUrl, memberId, password) {
         } catch (_) {}
       }
 
-      await page.waitForLoadState("load", { timeout: 15000 }).catch(() => {});
+      await page.waitForLoadState("domcontentloaded", { timeout: 30000 }).catch(() => {});
+      await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {});
       await sleep(3000);
     }
 
     const html = await page.content();
-    await context.close();
+    await page.close();
     return html;
   } catch (e) {
-    await context.close().catch(() => {});
+    await page.close().catch(() => {});
     if (/timeout|Timeout|exceeded/i.test(e.message)) {
       console.log(
         "[login] 接続がタイムアウトしました。Render 等のクラウドからは onlineticket がブロックされている可能性があります。自宅PCや Raspberry Pi で「node index.js」を実行するとつながることが多いです。"
