@@ -366,6 +366,7 @@ async function fetchDetailHtmlWithPlaywright(listUrl) {
 }
 
 async function checkDetailPage() {
+  console.log("[detail] 詳細ページチェック開始");
   try {
     let html = "";
 
@@ -385,8 +386,10 @@ async function checkDetailPage() {
       }
 
       try {
+        console.log("[detail] 一覧ページを開いています…");
         const { listHtml, detailHtml } = await fetchDetailHtmlWithPlaywright(url);
         html = detailHtml;
+        console.log("[detail] 詳細ページに入りました");
 
         const { url: extractedUrl, onclickValue, 公演日, 公演時間, 公演タイトル } =
           getDetailUrlFromListHtml(listHtml);
@@ -424,6 +427,7 @@ async function checkDetailPage() {
       return;
     }
 
+    console.log("[detail] 当日引換券テーブルを解析中");
     const rows = [...html.matchAll(/<tr>([\s\S]*?)<\/tr>/g)];
     const availableDates = [];
     const dateStatuses = []; // 日付ごとの ○/△/×（×でも通知用）
