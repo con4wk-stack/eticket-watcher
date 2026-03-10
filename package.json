@@ -2,11 +2,16 @@
   "name": "eticket-watcher",
   "version": "1.0.0",
   "type": "module",
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "postinstall": "npx playwright install chromium"
   },
   "dependencies": {
-    "express": "^5.2.1",
-    "node-fetch": "^3.3.2"
+    "express": "^4.21.0",
+    "node-fetch": "^3.3.2",
+    "playwright": "^1.49.0"
   }
 }
