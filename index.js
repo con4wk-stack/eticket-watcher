@@ -11,7 +11,7 @@ const LINE_TOKEN = "53HSL37fngc+EuTIdX2tBlWHdwb4evtfo1ZRLb1XK1uETtS9FeBOLqHVCUQv
 const LINE_USER_ID = "C755fb6ffbd64b76818fd0a4dac5b130f";
 
 // Chatwork（TOKEN と ROOM_ID が設定されている場合のみ送信）
-const _cwRoomRaw = (process.env.CHATWORK_ROOM_ID || "rid425373870").trim();
+const _cwRoomRaw = (process.env.CHATWORK_ROOM_ID || "rid425512899").trim();
 const CHATWORK_TOKEN = (process.env.CHATWORK_TOKEN || "70e88dacd51fa5ed6d319dea68286761").trim();
 const CHATWORK_ROOM_ID = _cwRoomRaw.match(/rid(\d+)/)?.[1] || _cwRoomRaw.replace(/\D/g, "") || "";
 
