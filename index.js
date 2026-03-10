@@ -35,14 +35,18 @@ app.post("/webhook", (req, res) => {
   console.log(JSON.stringify(req.body, null, 2));
   res.sendStatus(200);
 });
-app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
-
-console.log("Watcher started:", new Date().toISOString());
+app.listen(PORT, async () => {
+  console.log(`Server listening on port ${PORT}`);
+  console.log("Watcher started:", new Date().toISOString());
+  await sendStartupTestNotification();
+});
 
 let retrying = false;
 // 各ボタンの前回の状態。key = 公演日-公演時間-詳細リンク → true=primary, false=default
 // default→primary になったときだけ通知し、primary→default になったら false に戻す（再販でまた通知できる）
 let lastButtonState = new Map();
+// 初回の一覧チェックでは通知しない（起動時・再デプロイ時に全件通知されないようにする）
+let listCheckInitialized = false;
 
 function isBattleTime() {
   const now = new Date();
@@ -158,6 +162,34 @@ async function sendChatworkMessage(text) {
   }
 }
 
+/** 起動時（デプロイ完了時）に1回だけ送るテスト通知（LINE/Chatwork が届くか確認用） */
+async function sendStartupTestNotification() {
+  const message = [
+    "🔔 Watcher が起動しました（デプロイ完了）",
+    "LINE・Chatwork 通知は正常です。チケットや当日引換券に変化があったときだけ通知します。",
+  ].join("\n");
+  if (LINE_TOKEN && LINE_USER_ID) {
+    try {
+      const lineRes = await fetch("https://api.line.me/v2/bot/message/push", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${LINE_TOKEN}`,
+        },
+        body: JSON.stringify({
+          to: LINE_USER_ID,
+          messages: [{ type: "text", text: message }],
+        }),
+      });
+      if (lineRes.ok) console.log("起動テスト: LINE送信 OK");
+      else console.log("起動テスト: LINEエラー", await lineRes.text());
+    } catch (e) {
+      console.log("起動テスト: LINE送信失敗", e.message);
+    }
+  }
+  await sendChatworkMessage(message);
+}
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function checkPage() {
@@ -203,8 +235,8 @@ async function checkPage() {
       const key = `${block.公演日}-${block.公演時間}-${link}`;
       const wasPrimary = lastButtonState.get(key);
 
-      // default → primary になったときだけ通知（初回も wasPrimary が undefined なので通知）
-      if (block.isPrimary && wasPrimary !== true) {
+      // default → primary になったときだけ通知（初回は listCheckInitialized が false なので通知しない）
+      if (block.isPrimary && wasPrimary !== true && listCheckInitialized) {
         const message = buildNotificationMessage(
           { 公演日: block.公演日, 公演時間: block.公演時間, 詳細リンク: block.詳細リンク },
           url
@@ -245,6 +277,7 @@ async function checkPage() {
       if (!found) lastButtonState.delete(key);
     }
 
+    listCheckInitialized = true; // 2回目以降は「変化があったときだけ」通知する
     console.log("Checked at:", new Date().toISOString());
     retrying = false;
   } catch (err) {
@@ -393,6 +426,7 @@ async function checkDetailPage() {
 
     const rows = [...html.matchAll(/<tr>([\s\S]*?)<\/tr>/g)];
     const availableDates = [];
+    const dateStatuses = []; // 詳細ページテスト用: 日付ごとの ○/△/×
 
     for (const row of rows) {
 
@@ -407,6 +441,8 @@ async function checkDetailPage() {
       if (cells.length < 2) continue;
 
       const normal = cells[0][1];
+      const status = normal.includes("○") ? "○" : normal.includes("△") ? "△" : "×";
+      dateStatuses.push(`${date} ${status}`);
 
       // 当日引換券 在庫チェック
       if (normal.includes("○") || normal.includes("△")) {
@@ -415,8 +451,40 @@ async function checkDetailPage() {
     }
 
     const state = JSON.stringify(availableDates);
+    const isDetailFirstRun = lastDetailState === null; // 初回は通知しない（起動時・再デプロイ時の全件通知を防ぐ）
 
-    if (state !== lastDetailState && availableDates.length > 0) {
+    // 詳細ページテスト: 初回だけ × 含めて全状態を通知（デプロイ後に届くか確認用）
+    if (isDetailFirstRun && dateStatuses.length > 0) {
+      const testMessage = [
+        "📋 詳細ページテスト（初回のみ）",
+        "当日引換券の現在の状態:",
+        ...dateStatuses,
+        "",
+        url,
+      ].join("\n");
+      if (LINE_TOKEN && LINE_USER_ID) {
+        try {
+          const lineRes = await fetch("https://api.line.me/v2/bot/message/push", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${LINE_TOKEN}`,
+            },
+            body: JSON.stringify({
+              to: LINE_USER_ID,
+              messages: [{ type: "text", text: testMessage }],
+            }),
+          });
+          if (lineRes.ok) console.log("[detail] テスト通知: LINE送信 OK");
+          else console.log("[detail] テスト通知: LINEエラー", await lineRes.text());
+        } catch (e) {
+          console.log("[detail] テスト通知: LINE送信失敗", e.message);
+        }
+      }
+      await sendChatworkMessage(testMessage);
+    }
+
+    if (!isDetailFirstRun && state !== lastDetailState && availableDates.length > 0) {
 
       const message = [
         "🎫 当日引換券が復活！",
