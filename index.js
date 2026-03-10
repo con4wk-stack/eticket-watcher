@@ -373,6 +373,22 @@ let detailRetrying = false;
 
 const MAX_HTML_SIZE = 400000;
 
+/** page.content() が navigating で失敗する場合に待機してリトライする */
+async function getPageContentWithRetry(page, maxRetries = 5) {
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      return await page.content();
+    } catch (e) {
+      const isNavigating = /navigating|changing the content/i.test(e.message);
+      if (isNavigating && i < maxRetries - 1) {
+        await sleep(2500);
+        continue;
+      }
+      throw e;
+    }
+  }
+}
+
 /**
  * Playwright で一覧を開き、最後の「詳細」ボタンをクリックして遷移し、詳細ページの HTML を取得。
  * ログ用に一覧 HTML も返す。
@@ -396,21 +412,48 @@ async function fetchDetailHtmlWithPlaywright(listUrl) {
     const page = await context.newPage();
     await page.goto(listUrl, { waitUntil: "domcontentloaded", timeout: TIMEOUT });
     await page.waitForLoadState("load", { timeout: 10000 }).catch(() => {});
-    let listHtml = await page.content();
+    let listHtml = await getPageContentWithRetry(page);
     listHtml = listHtml.slice(0, MAX_HTML_SIZE);
 
-    // 最後の「詳細」ボタン（onclick で window.location.href を持つもの）をクリック
-    const buttons = await page.$$('button[onclick*="window.location.href"]');
-    if (buttons.length === 0) {
-      throw new Error("詳細ボタンが見つかりません");
+    const maxDetailAttempts = 2; // 遷移エラー時は一覧を更新してから再遷移する
+    let detailHtml = null;
+    for (let attempt = 0; attempt < maxDetailAttempts; attempt++) {
+      if (attempt > 0) {
+        // 一覧へ戻って更新してから詳細へ再度遷移する
+        await page.goto(listUrl, { waitUntil: "domcontentloaded", timeout: TIMEOUT });
+        await page.waitForLoadState("load", { timeout: 10000 }).catch(() => {});
+        await sleep(1000);
+      }
+      const buttons = await page.$$('button[onclick*="window.location.href"]');
+      if (buttons.length === 0) {
+        throw new Error("詳細ボタンが見つかりません");
+      }
+      await buttons[buttons.length - 1].click({ timeout: 10000, noWaitAfter: true });
+      await page.waitForLoadState("domcontentloaded", { timeout: DETAIL_NAV_TIMEOUT });
+      await page.waitForLoadState("load", { timeout: 10000 }).catch(() => {});
+      await sleep(2000);
+      try {
+        detailHtml = await getPageContentWithRetry(page);
+        // 画面遷移エラーページ（<h1 class="heading01"><span>画面遷移エラー</span></h1>）の場合は一覧を更新して再遷移
+        if (detailHtml && detailHtml.includes("画面遷移エラー")) {
+          if (attempt === maxDetailAttempts - 1) {
+            throw new Error("画面遷移エラーページが表示されました");
+          }
+          console.log("[detail] 画面遷移エラーページのため一覧を更新して再遷移します");
+          detailHtml = null;
+          continue;
+        }
+        break;
+      } catch (e) {
+        if (attempt === maxDetailAttempts - 1) throw e;
+        if (/navigating|changing the content/i.test(e.message)) {
+          console.log("[detail] 遷移エラーのため一覧を更新して再遷移します");
+          continue;
+        }
+        throw e;
+      }
     }
-    // クリック後のナビゲーション待ちを延長（詳細ページが遅いため noWaitAfter で自前で待つ）
-    await buttons[buttons.length - 1].click({ timeout: 10000, noWaitAfter: true });
-    await page.waitForLoadState("domcontentloaded", { timeout: DETAIL_NAV_TIMEOUT });
-    await page.waitForLoadState("load", { timeout: 10000 }).catch(() => {});
-    await sleep(1500); // クライアント描画の落ち着き待ち（navigating エラー回避）
-    let detailHtml = await page.content();
-    detailHtml = detailHtml.slice(0, MAX_HTML_SIZE);
+    detailHtml = (detailHtml || "").slice(0, MAX_HTML_SIZE);
     await page.close();
 
     return { listHtml, detailHtml };
