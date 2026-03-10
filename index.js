@@ -7,6 +7,8 @@ if (!process.env.PLAYWRIGHT_BROWSERS_PATH) {
   process.env.PLAYWRIGHT_BROWSERS_PATH = path.join(process.cwd(), "playwright-browsers");
 }
 
+let browser = null;
+
 const url = "https://eplus.jp/sf/detail/0473460001";
 const LINE_TOKEN = "53HSL37fngc+EuTIdX2tBlWHdwb4evtfo1ZRLb1XK1uETtS9FeBOLqHVCUQvO7YVssWAI/W1NfQ8yUPVIuQFY7425HbkBwzLmj2Ljt7zT0xcNhKgcNj/P5C631nktl1O44WQb2m+JLWQ/lF+CYUdxQdB04t89/1O/w1cDnyilFU=";
 const LINE_USER_ID = "C755fb6ffbd64b76818fd0a4dac5b130f";
@@ -39,6 +41,14 @@ app.listen(PORT, async () => {
   console.log(`Server listening on port ${PORT}`);
   console.log("Watcher started:", new Date().toISOString());
   await sendStartupTestNotification();
+});
+
+// Render などでサービス停止時（SIGTERM）にブラウザを閉じてから終了する
+process.on("SIGTERM", async () => {
+  if (browser) {
+    await browser.close().catch(() => {});
+  }
+  process.exit(0);
 });
 
 let retrying = false;
@@ -342,9 +352,22 @@ let detailRetrying = false;
 async function fetchDetailHtmlWithPlaywright(listUrl) {
   const playwright = await import("playwright");
   const { chromium } = playwright;
-  const browser = await chromium.launch({ headless: true });
+  if (!browser) {
+    browser = await chromium.launch({
+      headless: true,
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--no-zygote",
+        "--single-process"
+      ]
+    });
+  }
+  let context;
   try {
-    const context = await browser.newContext({ userAgent: USER_AGENT });
+    context = await browser.newContext({ userAgent: USER_AGENT });
     const page = await context.newPage();
     await page.goto(listUrl, { waitUntil: "domcontentloaded", timeout: TIMEOUT });
     const listHtml = await page.content();
@@ -360,8 +383,15 @@ async function fetchDetailHtmlWithPlaywright(listUrl) {
     const detailHtml = await page.content();
 
     return { listHtml, detailHtml };
+  } catch (e) {
+    // ブラウザが落ちた・切断されたと判断できる場合は次回に再起動する
+    if (/browser|context|target|closed|Connection/i.test(e.message)) {
+      browser = null;
+      console.log("[detail] ブラウザ再接続のため次回起動し直します");
+    }
+    throw e;
   } finally {
-    await browser.close();
+    if (context) await context.close();
   }
 }
 
