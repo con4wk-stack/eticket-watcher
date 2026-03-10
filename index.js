@@ -1,3 +1,8 @@
+/**
+ * イープラス（e+）チケット一覧監視
+ * https://eplus.jp/sf/detail/0473460001 の一覧を fetch し、
+ * button--default / button--primary の状態変化を検知して LINE / Chatwork に通知する。
+ */
 import fetch from "node-fetch";
 import express from "express";
 
@@ -7,7 +12,7 @@ const LINE_USER_ID = "C755fb6ffbd64b76818fd0a4dac5b130f";
 
 // Chatwork（TOKEN と ROOM_ID が設定されている場合のみ送信）
 const _cwRoomRaw = (process.env.CHATWORK_ROOM_ID || "rid425373870").trim();
-const CHATWORK_TOKEN = (process.env.CHATWORK_TOKEN || "f03fec5446114f0da54c391afcbab29e").trim();
+const CHATWORK_TOKEN = (process.env.CHATWORK_TOKEN || "70e88dacd51fa5ed6d319dea68286761").trim();
 const CHATWORK_ROOM_ID = _cwRoomRaw.match(/rid(\d+)/)?.[1] || _cwRoomRaw.replace(/\D/g, "") || "";
 
 const NORMAL_INTERVAL = 30000;
