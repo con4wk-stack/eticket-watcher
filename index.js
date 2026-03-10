@@ -432,6 +432,13 @@ async function fetchDetailHtmlWithPlaywright(listUrl) {
       await page.waitForLoadState("domcontentloaded", { timeout: DETAIL_NAV_TIMEOUT });
       await page.waitForLoadState("load", { timeout: 10000 }).catch(() => {});
       await sleep(2000);
+      // 当日引換券テーブル（ticketDate）が JS で描画されるまで最大10秒待つ
+      await page
+        .waitForFunction(
+          () => document.body && document.body.innerHTML.includes("ticketDate"),
+          { timeout: 10000 }
+        )
+        .catch(() => {});
       try {
         detailHtml = await getPageContentWithRetry(page);
         // 画面遷移エラーページ（<h1 class="heading01"><span>画面遷移エラー</span></h1>）の場合は一覧を更新して再遷移
@@ -522,7 +529,13 @@ async function checkDetailPage() {
     }
 
     if (!html.includes("ticketDate")) {
-      console.log("[detail] ページ取得失敗（テーブル無し）");
+      const len = html.length;
+      const hasTicket = /ticket|チケット|券/.test(html);
+      console.log(
+        "[detail] ページ取得失敗（テーブル無し）",
+        "html長=" + len,
+        hasTicket ? "（ticket等の文字はあり）" : ""
+      );
       return;
     }
 
@@ -532,23 +545,27 @@ async function checkDetailPage() {
     const dateStatuses = []; // 日付ごとの ○/△/×（×でも通知用）
 
     for (const row of rows) {
+      // 日付: <div class="ticketDate">…</div> 内のテキスト（入れ子span対応）
+      const ticketDateDiv = row[1].match(/<div class="ticketDate">([\s\S]*?)<\/div>/);
+      if (!ticketDateDiv) continue;
 
-      const dateMatch = row[1].match(/ticketDate[\s\S]*?>([\s\S]*?)<\/span>/);
+      const dateRaw = ticketDateDiv[1].replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
+      const date = dateRaw;
 
-      if (!dateMatch) continue;
-
-      const date = dateMatch[1].replace(/\s+/g, " ").trim();
-
+      // 当日引換券の列のみ（1列目のtd）。見切席当日引換券は見ない
       const cells = [...row[1].matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)];
+      if (cells.length < 1) continue;
 
-      if (cells.length < 2) continue;
-
-      const normal = cells[0][1];
-      const status = normal.includes("○") ? "○" : normal.includes("△") ? "△" : "×";
+      const firstCell = cells[0][1]; // 当日引換券のセル
+      const status = firstCell.includes("○")
+        ? "○"
+        : firstCell.includes("△")
+          ? "△"
+          : "×"; // 受付終了・休演・× はすべて ×
       dateStatuses.push(`${date} ${status}`);
 
-      // 当日引換券 在庫チェック
-      if (normal.includes("○") || normal.includes("△")) {
+      // 当日引換券 在庫チェック（○ or △ のみ復活通知対象）
+      if (firstCell.includes("○") || firstCell.includes("△")) {
         availableDates.push(date);
       }
     }
@@ -587,6 +604,7 @@ async function checkDetailPage() {
       await sendChatworkMessage(testMessage);
     }
 
+    // 当日引換券の列のみ：×→△ または ×→○ になった公演日があれば通知
     if (!isDetailFirstRun && state !== lastDetailState && availableDates.length > 0) {
 
       const message = [
