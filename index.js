@@ -436,26 +436,40 @@ async function fetchDetailHtmlWithPlaywright(listUrl) {
       // ローディングはすぐ終わることもあれば5秒かかるときもあるため、
       // 本編の目印である .ticketDate が表示されるまで待つ（最大20秒）
       await page.waitForLoadState("networkidle", { timeout: 20000 }).catch(() => {});
+      await sleep(2000);
+      // 詳細が iframe で読まれることがあるので iframe があれば出現を待つ（無ければ5秒で次へ）
+      await page.waitForSelector("iframe", { timeout: 5000 }).catch(() => {});
       await sleep(1000);
-      // 当日引換券テーブル（.ticketDate）が描画されるまで最大20秒待つ（メインフレーム）
+      // 当日引換券テーブル（.ticketDate）をメイン or iframe のどこかで最大30秒待つ
       let ticketDateFrame = null;
-      await page.waitForSelector(".ticketDate", { timeout: 20000 }).catch(() => {});
-      if (!(await page.locator(".ticketDate").count())) {
-        // メインに無ければ iframe 内を探す
+      const waitMs = 30000;
+      const deadline = Date.now() + waitMs;
+      const tryFrame = async (frame) => {
+        const left = Math.max(2000, deadline - Date.now());
+        try {
+          await frame.waitForSelector(".ticketDate", { timeout: left });
+          return true;
+        } catch (_) {
+          return false;
+        }
+      };
+      if (await tryFrame(page.mainFrame())) {
+        ticketDateFrame = null; // メインから取得する
+      } else {
         for (const frame of page.frames()) {
           if (frame === page.mainFrame()) continue;
-          try {
-            await frame.waitForSelector(".ticketDate", { timeout: 5000 });
+          if (await tryFrame(frame)) {
             ticketDateFrame = frame;
             console.log("[detail] テーブルは iframe 内にありました");
             break;
-          } catch (_) {}
+          }
         }
       }
       try {
-        detailHtml = ticketDateFrame
-          ? await ticketDateFrame.evaluate(() => document.documentElement.outerHTML)
-          : await getPageContentWithRetry(page);
+        detailHtml =
+          ticketDateFrame != null
+            ? await ticketDateFrame.evaluate(() => document.documentElement.outerHTML)
+            : await getPageContentWithRetry(page);
         // 画面遷移エラーページの場合は一覧を更新して再遷移
         if (detailHtml && detailHtml.includes("画面遷移エラー")) {
           if (attempt === maxDetailAttempts - 1) {
@@ -465,17 +479,20 @@ async function fetchDetailHtmlWithPlaywright(listUrl) {
           detailHtml = null;
           continue;
         }
-        // 取得 HTML が極端に短い場合：iframe 内に詳細がある可能性があるので取得を試みる
+        // 取得 HTML が極端に短い場合：iframe の遅延読込の可能性があるので少し待ってから全フレームを再取得
         if (detailHtml && detailHtml.length < 500 && !detailHtml.includes("ticketDate")) {
-          const frames = page.frames();
-          for (const frame of frames) {
-            if (frame === page.mainFrame()) continue;
+          console.log("[detail] HTMLが短いため5秒待ってから全フレームを再確認します");
+          await sleep(5000);
+          for (const frame of page.frames()) {
             try {
-              const frameHtml = await frame.evaluate(() => document.documentElement.outerHTML);
-              if (frameHtml && frameHtml.length > 500 && frameHtml.includes("ticketDate")) {
-                console.log("[detail] iframe 内からテーブルを取得しました");
-                detailHtml = frameHtml;
-                break;
+              const has = await frame.$(".ticketDate");
+              if (has) {
+                const frameHtml = await frame.evaluate(() => document.documentElement.outerHTML);
+                if (frameHtml && frameHtml.includes("ticketDate")) {
+                  console.log("[detail] 再確認でフレーム内からテーブルを取得しました");
+                  detailHtml = frameHtml;
+                  break;
+                }
               }
             } catch (_) {}
           }
