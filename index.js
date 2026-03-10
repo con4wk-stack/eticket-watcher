@@ -292,64 +292,47 @@ function getDetailUrlFromListHtml(html) {
 const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
-const DETAIL_HEADERS = {
-  "User-Agent": USER_AGENT,
-  "Accept":
-    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-  "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
-  Referer: url,
-  "Connection": "keep-alive",
-  "Upgrade-Insecure-Requests": "1",
-  "DNT": "1",
-};
-
 let lastDetailState = null;
 let detailRetrying = false;
 
 /**
- * 一覧レスポンスで受け取った Cookie を次のリクエスト用の文字列にまとめる
+ * Playwright で一覧を開き、最後の「詳細」ボタンをクリックして遷移し、詳細ページの HTML を取得。
+ * ログ用に一覧 HTML も返す。
  */
-function getCookieHeaderFromResponse(listRes) {
-  const setCookie = listRes.headers.get("set-cookie") ?? listRes.headers.get("Set-Cookie");
-  if (setCookie) return setCookie;
-  if (typeof listRes.headers.getSetCookie === "function") {
-    return listRes.headers.getSetCookie().join("; ");
+async function fetchDetailHtmlWithPlaywright(listUrl) {
+  const playwright = await import("playwright");
+  const { chromium } = playwright;
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const context = await browser.newContext({ userAgent: USER_AGENT });
+    const page = await context.newPage();
+    await page.goto(listUrl, { waitUntil: "domcontentloaded", timeout: TIMEOUT });
+    const listHtml = await page.content();
+
+    // 最後の「詳細」ボタン（onclick で window.location.href を持つもの）をクリック
+    const buttons = await page.$$('button[onclick*="window.location.href"]');
+    if (buttons.length === 0) {
+      throw new Error("詳細ボタンが見つかりません");
+    }
+    await buttons[buttons.length - 1].click();
+    await page.waitForLoadState("domcontentloaded", { timeout: TIMEOUT });
+    const detailHtml = await page.content();
+
+    return { listHtml, detailHtml };
+  } finally {
+    await browser.close();
   }
-  return "";
-}
-
-/**
- * fetch で一覧→詳細の順にアクセス（一覧で取得した Cookie + Referer で「ボタンクリック相当」の遷移）
- */
-async function fetchDetailHtmlWithFetch(listUrl, detailUrl, listRes) {
-  const cookieHeader = getCookieHeaderFromResponse(listRes);
-  const headers = { ...DETAIL_HEADERS, Referer: listUrl };
-  if (cookieHeader) headers.Cookie = cookieHeader;
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), TIMEOUT);
-  const res = await fetch(detailUrl, {
-    signal: controller.signal,
-    headers,
-  });
-  clearTimeout(timeout);
-
-  if (!res.ok) {
-    throw new Error(`detail fetch ${res.status}`);
-  }
-  return res.text();
 }
 
 async function checkDetailPage() {
   try {
     let html = "";
-    let detailUrl = null;
 
-    // アクセス順序: 一覧 → 詳細（一覧で Cookie/Referer を取得し、詳細は「クリック相当」で fetch）
+    // Playwright で一覧を開き、最後のボタンをクリックして詳細へ遷移
     for (let attempt = 0; attempt < FIVE_XX_RETRY_COUNT; attempt++) {
       if (attempt > 0) {
         console.log(
-          "[detail] 403/5xx のため一覧に戻ってセッション更新し再試行:",
+          "[detail] 再試行:",
           attempt + 1,
           "/",
           FIVE_XX_RETRY_COUNT,
@@ -360,52 +343,30 @@ async function checkDetailPage() {
         await sleep(FIVE_XX_RETRY_WAIT_MS);
       }
 
-      // 1. 一覧ページにアクセス（Cookie/セッション取得）
-      const listController = new AbortController();
-      const listTimeout = setTimeout(() => listController.abort(), TIMEOUT);
-      const listRes = await fetch(url, {
-        signal: listController.signal,
-        headers: DETAIL_HEADERS,
-      });
-      clearTimeout(listTimeout);
-
-      if (!listRes.ok) {
-        console.log("[detail] 一覧取得失敗:", listRes.status);
-        return;
-      }
-
-      const listHtml = await listRes.text();
-
-      const { url: extractedUrl, onclickValue, 公演日, 公演時間, 公演タイトル } =
-        getDetailUrlFromListHtml(listHtml);
-
-      if (!extractedUrl) {
-        console.log("[detail] 一覧から最後の詳細ボタンのURLを取得できませんでした");
-        return;
-      }
-
-      detailUrl = extractedUrl;
-      console.log("[detail] onclick:", onclickValue ?? "(なし)");
-      console.log("[detail] extracted url:", detailUrl);
-      if (detailUrl.includes("sp.atom.eplus.jp")) {
-        detailUrl = detailUrl.replace("sp.atom.eplus.jp", "atom.eplus.jp");
-      }
-      console.log("[detail] fixed url (PC版):", detailUrl);
-
-      console.log(
-        "[detail] 一番最後のボタン（クリック相当で遷移）:",
-        "date=" + 公演日,
-        "time=" + 公演時間,
-        "title=" + 公演タイトル
-      );
-
-      // 2. 一覧の Cookie + Referer で詳細ページを fetch（ボタンクリック相当）
       try {
-        html = await fetchDetailHtmlWithFetch(url, detailUrl, listRes);
-        console.log("[detail] status: 200 (fetch)");
+        const { listHtml, detailHtml } = await fetchDetailHtmlWithPlaywright(url);
+        html = detailHtml;
+
+        const { url: extractedUrl, onclickValue, 公演日, 公演時間, 公演タイトル } =
+          getDetailUrlFromListHtml(listHtml);
+        if (extractedUrl) {
+          console.log("[detail] onclick:", onclickValue ?? "(なし)");
+          console.log("[detail] extracted url:", extractedUrl);
+          const fixedUrl = extractedUrl.includes("sp.atom.eplus.jp")
+            ? extractedUrl.replace("sp.atom.eplus.jp", "atom.eplus.jp")
+            : extractedUrl;
+          console.log("[detail] fixed url (PC版):", fixedUrl);
+          console.log(
+            "[detail] 一番最後のボタン（クリックして遷移）:",
+            "date=" + 公演日,
+            "time=" + 公演時間,
+            "title=" + 公演タイトル
+          );
+        }
+        console.log("[detail] status: 200 (Playwright)");
         break;
       } catch (e) {
-        console.log("[detail] fetch error:", e.message);
+        console.log("[detail] Playwright error:", e.message);
         if (attempt < FIVE_XX_RETRY_COUNT - 1) continue;
         html = "";
         break;
