@@ -5,7 +5,7 @@ process.env.PLAYWRIGHT_BROWSERS_PATH = "./playwright-browsers";
 
 let browser = null;
 
-// onlineticket（FCサイト）: 会員番号・パスワードでログインしてから一覧を監視
+// onlineticket（FCサイト）: url＝一覧ページ。ここを開いて onclick で詳細へ遷移してから監視
 const url = process.env.WATCH_URL || "https://w1.onlineticket.jp/sf/tkt18/detail/0473460001?P6=464";
 // ここにFCの会員番号とパスワードを直接入力してください
 const MEMBER_ID = "099345"; // 会員番号
@@ -260,10 +260,17 @@ async function fetchListHtmlWithLogin(pageUrl, memberId, password) {
   const context = await browser.newContext({ userAgent: USER_AGENT });
   const page = await context.newPage();
   try {
+    // 一覧ページ（url）を開いてから onclick で詳細へ遷移
     await page.goto(pageUrl, { waitUntil: "commit", timeout: 90000 });
     await page.waitForLoadState("domcontentloaded", { timeout: 60000 }).catch(() => {});
     await page.waitForLoadState("load", { timeout: 30000 }).catch(() => {});
     await sleep(2000);
+    const buttons = await page.$$('button[onclick*="window.location.href"]');
+    if (buttons.length > 0) {
+      await buttons[buttons.length - 1].click();
+      await page.waitForLoadState("load", { timeout: 30000 }).catch(() => {});
+      await sleep(2000);
+    }
 
     const needLogin =
       (memberId && password && (await page.locator('input[type="password"]').count()) > 0) ||
@@ -314,7 +321,10 @@ async function fetchListHtmlWithLogin(pageUrl, memberId, password) {
         } catch (_) {}
       }
 
-      await page.waitForLoadState("load", { timeout: 15000 }).catch(() => {});
+      // ログイン後は画面が切り替わるので、遷移完了まで待つ
+      await page.waitForLoadState("domcontentloaded", { timeout: 30000 }).catch(() => {});
+      await page.waitForLoadState("load", { timeout: 30000 }).catch(() => {});
+      await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {});
       await sleep(3000);
     }
 
