@@ -429,19 +429,34 @@ async function fetchDetailHtmlWithPlaywright(listUrl) {
         throw new Error("詳細ボタンが見つかりません");
       }
       await buttons[buttons.length - 1].click({ timeout: 10000, noWaitAfter: true });
+      // 詳細ページへ遷移するまで待つ（URL が変わるまで）
+      await page.waitForURL(/main\.jsp|atom\.eplus|eplus\.jp/, { timeout: DETAIL_NAV_TIMEOUT }).catch(() => {});
       await page.waitForLoadState("domcontentloaded", { timeout: DETAIL_NAV_TIMEOUT });
-      await page.waitForLoadState("load", { timeout: 10000 }).catch(() => {});
-      await sleep(2000);
-      // 当日引換券テーブル（ticketDate）が JS で描画されるまで最大10秒待つ
-      await page
-        .waitForFunction(
-          () => document.body && document.body.innerHTML.includes("ticketDate"),
-          { timeout: 10000 }
-        )
-        .catch(() => {});
+      await page.waitForLoadState("load", { timeout: 15000 }).catch(() => {});
+      // ローディングはすぐ終わることもあれば5秒かかるときもあるため、
+      // 本編の目印である .ticketDate が表示されるまで待つ（最大20秒）
+      await page.waitForLoadState("networkidle", { timeout: 20000 }).catch(() => {});
+      await sleep(1000);
+      // 当日引換券テーブル（.ticketDate）が描画されるまで最大20秒待つ（メインフレーム）
+      let ticketDateFrame = null;
+      await page.waitForSelector(".ticketDate", { timeout: 20000 }).catch(() => {});
+      if (!(await page.locator(".ticketDate").count())) {
+        // メインに無ければ iframe 内を探す
+        for (const frame of page.frames()) {
+          if (frame === page.mainFrame()) continue;
+          try {
+            await frame.waitForSelector(".ticketDate", { timeout: 5000 });
+            ticketDateFrame = frame;
+            console.log("[detail] テーブルは iframe 内にありました");
+            break;
+          } catch (_) {}
+        }
+      }
       try {
-        detailHtml = await getPageContentWithRetry(page);
-        // 画面遷移エラーページ（<h1 class="heading01"><span>画面遷移エラー</span></h1>）の場合は一覧を更新して再遷移
+        detailHtml = ticketDateFrame
+          ? await ticketDateFrame.evaluate(() => document.documentElement.outerHTML)
+          : await getPageContentWithRetry(page);
+        // 画面遷移エラーページの場合は一覧を更新して再遷移
         if (detailHtml && detailHtml.includes("画面遷移エラー")) {
           if (attempt === maxDetailAttempts - 1) {
             throw new Error("画面遷移エラーページが表示されました");
@@ -449,6 +464,26 @@ async function fetchDetailHtmlWithPlaywright(listUrl) {
           console.log("[detail] 画面遷移エラーページのため一覧を更新して再遷移します");
           detailHtml = null;
           continue;
+        }
+        // 取得 HTML が極端に短い場合：iframe 内に詳細がある可能性があるので取得を試みる
+        if (detailHtml && detailHtml.length < 500 && !detailHtml.includes("ticketDate")) {
+          const frames = page.frames();
+          for (const frame of frames) {
+            if (frame === page.mainFrame()) continue;
+            try {
+              const frameHtml = await frame.evaluate(() => document.documentElement.outerHTML);
+              if (frameHtml && frameHtml.length > 500 && frameHtml.includes("ticketDate")) {
+                console.log("[detail] iframe 内からテーブルを取得しました");
+                detailHtml = frameHtml;
+                break;
+              }
+            } catch (_) {}
+          }
+        }
+        if (detailHtml && detailHtml.length < 500 && !detailHtml.includes("ticketDate")) {
+          console.log("[detail] 取得HTMLが短い(長=" + detailHtml.length + ")のため、詳細を再取得します");
+          detailHtml = null;
+          if (attempt < maxDetailAttempts - 1) continue;
         }
         break;
       } catch (e) {
