@@ -1,6 +1,7 @@
 import fetch from "node-fetch";
 import express from "express";
 import path from "path";
+import { chromium } from "playwright";
 
 // Render などでビルド時に入れたブラウザをプロジェクト内から参照（起動時に一度だけ設定）
 if (!process.env.PLAYWRIGHT_BROWSERS_PATH) {
@@ -27,6 +28,7 @@ const TIMEOUT = 15000;
 const DETAIL_NAV_TIMEOUT = 60000; // 詳細ページ遷移後の読み込み待ち（クリック後が遅いため延長）
 const FIVE_XX_RETRY_COUNT = 3;   // 5xx 時の同一チェック内リトライ回数
 const FIVE_XX_RETRY_WAIT_MS = 15000; // 5xx リトライまでの待機（ミリ秒）
+const DETAIL_CHECK_INTERVAL = 30000;
 
 const app = express();
 app.use(express.json());
@@ -345,24 +347,26 @@ const USER_AGENT =
 let lastDetailState = null;
 let detailRetrying = false;
 
+const CHROMIUM_LAUNCH_ARGS = [
+  "--no-sandbox",
+  "--disable-setuid-sandbox",
+  "--disable-dev-shm-usage",
+  "--disable-gpu",
+  "--no-zygote",
+  "--single-process"
+];
+
+const MAX_HTML_SIZE = 400000;
+
 /**
  * Playwright で一覧を開き、最後の「詳細」ボタンをクリックして遷移し、詳細ページの HTML を取得。
  * ログ用に一覧 HTML も返す。
  */
 async function fetchDetailHtmlWithPlaywright(listUrl) {
-  const playwright = await import("playwright");
-  const { chromium } = playwright;
   if (!browser) {
     browser = await chromium.launch({
       headless: true,
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-gpu",
-        "--no-zygote",
-        "--single-process"
-      ]
+      args: CHROMIUM_LAUNCH_ARGS
     });
   }
   let context;
@@ -370,7 +374,8 @@ async function fetchDetailHtmlWithPlaywright(listUrl) {
     context = await browser.newContext({ userAgent: USER_AGENT });
     const page = await context.newPage();
     await page.goto(listUrl, { waitUntil: "domcontentloaded", timeout: TIMEOUT });
-    const listHtml = await page.content();
+    let listHtml = await page.content();
+    listHtml = listHtml.slice(0, MAX_HTML_SIZE);
 
     // 最後の「詳細」ボタン（onclick で window.location.href を持つもの）をクリック
     const buttons = await page.$$('button[onclick*="window.location.href"]');
@@ -380,7 +385,9 @@ async function fetchDetailHtmlWithPlaywright(listUrl) {
     // クリック後のナビゲーション待ちを延長（詳細ページが遅いため noWaitAfter で自前で待つ）
     await buttons[buttons.length - 1].click({ timeout: 10000, noWaitAfter: true });
     await page.waitForLoadState("domcontentloaded", { timeout: DETAIL_NAV_TIMEOUT });
-    const detailHtml = await page.content();
+    let detailHtml = await page.content();
+    detailHtml = detailHtml.slice(0, MAX_HTML_SIZE);
+    await page.close();
 
     return { listHtml, detailHtml };
   } catch (e) {
@@ -426,10 +433,6 @@ async function checkDetailPage() {
         if (extractedUrl) {
           console.log("[detail] onclick:", onclickValue ?? "(なし)");
           console.log("[detail] extracted url:", extractedUrl);
-          const fixedUrl = extractedUrl.includes("sp.atom.eplus.jp")
-            ? extractedUrl.replace("sp.atom.eplus.jp", "atom.eplus.jp")
-            : extractedUrl;
-          console.log("[detail] fixed url (PC版):", fixedUrl);
           console.log(
             "[detail] 一番最後のボタン（クリックして遷移）:",
             "date=" + 公演日,
@@ -437,7 +440,6 @@ async function checkDetailPage() {
             "title=" + 公演タイトル
           );
         }
-        console.log("[detail] status: 200 (Playwright)");
         break;
       } catch (e) {
         console.log("[detail] Playwright error:", e.message);
@@ -569,5 +571,12 @@ async function checkDetailPage() {
   }
 }
 
+function scheduleNextDetailCheck() {
+  setTimeout(async () => {
+    await checkDetailPage().catch((e) => console.error("[detail] interval error:", e.message));
+    scheduleNextDetailCheck();
+  }, DETAIL_CHECK_INTERVAL);
+}
+
 checkDetailPage().catch((e) => console.error("[detail] startup error:", e.message));
-setInterval(() => checkDetailPage().catch((e) => console.error("[detail] interval error:", e.message)), 30000);
+scheduleNextDetailCheck();
