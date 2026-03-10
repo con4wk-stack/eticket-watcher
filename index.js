@@ -24,7 +24,7 @@ const NORMAL_INTERVAL = 30000;
 const BATTLE_INTERVAL = 15000;
 const RETRY_DELAY = 5000;
 const TIMEOUT = 15000;
-const LOGIN_TIMEOUT = 25000; // ログイン・ページ読み込み待ち
+const LOGIN_TIMEOUT = 90000; // ログイン・ページ読み込み待ち（90秒。Render 等クラウドからは遅い場合あり）
 const FIVE_XX_RETRY_COUNT = 3;   // 5xx 時の同一チェック内リトライ回数
 const FIVE_XX_RETRY_WAIT_MS = 15000; // 5xx リトライまでの待機（ミリ秒）
 
@@ -260,8 +260,9 @@ async function fetchListHtmlWithLogin(pageUrl, memberId, password) {
   const context = await browser.newContext({ userAgent: USER_AGENT });
   const page = await context.newPage();
   try {
-    await page.goto(pageUrl, { waitUntil: "domcontentloaded", timeout: LOGIN_TIMEOUT });
-    await page.waitForLoadState("load", { timeout: 15000 }).catch(() => {});
+    await page.goto(pageUrl, { waitUntil: "commit", timeout: 90000 });
+    await page.waitForLoadState("domcontentloaded", { timeout: 60000 }).catch(() => {});
+    await page.waitForLoadState("load", { timeout: 30000 }).catch(() => {});
     await sleep(2000);
 
     const needLogin =
