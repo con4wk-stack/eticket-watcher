@@ -2,6 +2,11 @@ import fetch from "node-fetch";
 import express from "express";
 import path from "path";
 
+// Render などでビルド時に入れたブラウザをプロジェクト内から参照（起動時に一度だけ設定）
+if (!process.env.PLAYWRIGHT_BROWSERS_PATH) {
+  process.env.PLAYWRIGHT_BROWSERS_PATH = path.join(process.cwd(), "playwright-browsers");
+}
+
 const url = "https://eplus.jp/sf/detail/0473460001";
 const LINE_TOKEN = "53HSL37fngc+EuTIdX2tBlWHdwb4evtfo1ZRLb1XK1uETtS9FeBOLqHVCUQvO7YVssWAI/W1NfQ8yUPVIuQFY7425HbkBwzLmj2Ljt7zT0xcNhKgcNj/P5C631nktl1O44WQb2m+JLWQ/lF+CYUdxQdB04t89/1O/w1cDnyilFU=";
 const LINE_USER_ID = "C755fb6ffbd64b76818fd0a4dac5b130f";
@@ -17,6 +22,7 @@ const NORMAL_INTERVAL = 30000;
 const BATTLE_INTERVAL = 15000;
 const RETRY_DELAY = 5000;
 const TIMEOUT = 15000;
+const DETAIL_NAV_TIMEOUT = 60000; // 詳細ページ遷移後の読み込み待ち（クリック後が遅いため延長）
 const FIVE_XX_RETRY_COUNT = 3;   // 5xx 時の同一チェック内リトライ回数
 const FIVE_XX_RETRY_WAIT_MS = 15000; // 5xx リトライまでの待機（ミリ秒）
 
@@ -301,10 +307,6 @@ let detailRetrying = false;
  * ログ用に一覧 HTML も返す。
  */
 async function fetchDetailHtmlWithPlaywright(listUrl) {
-  // Render などでビルド時に入れたブラウザをプロジェクト内から参照する
-  if (!process.env.PLAYWRIGHT_BROWSERS_PATH) {
-    process.env.PLAYWRIGHT_BROWSERS_PATH = path.join(process.cwd(), "playwright-browsers");
-  }
   const playwright = await import("playwright");
   const { chromium } = playwright;
   const browser = await chromium.launch({ headless: true });
@@ -319,8 +321,9 @@ async function fetchDetailHtmlWithPlaywright(listUrl) {
     if (buttons.length === 0) {
       throw new Error("詳細ボタンが見つかりません");
     }
-    await buttons[buttons.length - 1].click();
-    await page.waitForLoadState("domcontentloaded", { timeout: TIMEOUT });
+    // クリック後のナビゲーション待ちを延長（詳細ページが遅いため noWaitAfter で自前で待つ）
+    await buttons[buttons.length - 1].click({ timeout: 10000, noWaitAfter: true });
+    await page.waitForLoadState("domcontentloaded", { timeout: DETAIL_NAV_TIMEOUT });
     const detailHtml = await page.content();
 
     return { listHtml, detailHtml };
