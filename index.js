@@ -426,7 +426,7 @@ async function checkDetailPage() {
 
     const rows = [...html.matchAll(/<tr>([\s\S]*?)<\/tr>/g)];
     const availableDates = [];
-    const dateStatuses = []; // 詳細ページテスト用: 日付ごとの ○/△/×
+    const dateStatuses = []; // 日付ごとの ○/△/×（×でも通知用）
 
     for (const row of rows) {
 
@@ -453,11 +453,11 @@ async function checkDetailPage() {
     const state = JSON.stringify(availableDates);
     const isDetailFirstRun = lastDetailState === null; // 初回は通知しない（起動時・再デプロイ時の全件通知を防ぐ）
 
-    // 詳細ページテスト: 初回だけ × 含めて全状態を通知（デプロイ後に届くか確認用）
+    // 初回だけ × 含めて全状態を通知（一度通知の形を見たい用）
     if (isDetailFirstRun && dateStatuses.length > 0) {
       const testMessage = [
-        "📋 詳細ページテスト（初回のみ）",
-        "当日引換券の現在の状態:",
+        "📋 当日引換券の状態（初回通知）",
+        "",
         ...dateStatuses,
         "",
         url,
@@ -475,10 +475,10 @@ async function checkDetailPage() {
               messages: [{ type: "text", text: testMessage }],
             }),
           });
-          if (lineRes.ok) console.log("[detail] テスト通知: LINE送信 OK");
-          else console.log("[detail] テスト通知: LINEエラー", await lineRes.text());
+          if (lineRes.ok) console.log("[detail] 初回通知: LINE送信 OK");
+          else console.log("[detail] 初回通知: LINEエラー", await lineRes.text());
         } catch (e) {
-          console.log("[detail] テスト通知: LINE送信失敗", e.message);
+          console.log("[detail] 初回通知: LINE送信失敗", e.message);
         }
       }
       await sendChatworkMessage(testMessage);
