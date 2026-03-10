@@ -7,7 +7,7 @@
   },
   "scripts": {
     "start": "node index.js",
-    "postinstall": "npx playwright install chromium-headless-shell"
+    "postinstall": "PLAYWRIGHT_BROWSERS_PATH=./playwright-browsers npx playwright install chromium_headless_shell"
   },
   "dependencies": {
     "express": "^4.21.0",

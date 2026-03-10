@@ -1,5 +1,6 @@
 import fetch from "node-fetch";
 import express from "express";
+import path from "path";
 
 const url = "https://eplus.jp/sf/detail/0473460001";
 const LINE_TOKEN = "53HSL37fngc+EuTIdX2tBlWHdwb4evtfo1ZRLb1XK1uETtS9FeBOLqHVCUQvO7YVssWAI/W1NfQ8yUPVIuQFY7425HbkBwzLmj2Ljt7zT0xcNhKgcNj/P5C631nktl1O44WQb2m+JLWQ/lF+CYUdxQdB04t89/1O/w1cDnyilFU=";
@@ -300,6 +301,10 @@ let detailRetrying = false;
  * ログ用に一覧 HTML も返す。
  */
 async function fetchDetailHtmlWithPlaywright(listUrl) {
+  // Render などでビルド時に入れたブラウザをプロジェクト内から参照する
+  if (!process.env.PLAYWRIGHT_BROWSERS_PATH) {
+    process.env.PLAYWRIGHT_BROWSERS_PATH = path.join(process.cwd(), "playwright-browsers");
+  }
   const playwright = await import("playwright");
   const { chromium } = playwright;
   const browser = await chromium.launch({ headless: true });
