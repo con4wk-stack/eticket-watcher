@@ -375,7 +375,8 @@ async function fetchDetailHtmlWithPlaywright(listUrl) {
       args: [
         "--no-sandbox",
         "--disable-setuid-sandbox"
-      ]
+      ],
+      channel: "chromium"
     });
   }
   let context;
