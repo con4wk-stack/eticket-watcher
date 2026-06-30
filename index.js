@@ -108,7 +108,7 @@ function parseAllBlocks(html) {
 
 function buildNotificationMessage(item, pageUrl) {
   const lines = [
-    "🎉 チケット戻ったよ！🎾",
+    "[toall]🎉 チケット戻ったよ！🎾",
     "",
     `公演日：${item.公演日}`,
     `${item.公演時間 || "—"}`,
