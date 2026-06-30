@@ -1,13 +1,11 @@
 /**
- * チケット一覧監視（e+ / PIA）
+ * チケット一覧監視（e+）
  * - e+: button--default → button--primary の変化で LINE / Chatwork に通知
- * - PIA: ticketSelect__icon--close → ticketSelect__icon--few または close 削除で通知（別文言）
  */
 import fetch from "node-fetch";
 import express from "express";
 
 const EPLUS_URL = "https://eplus.jp/sf/detail/0473460001";
-const PIA_URL = "https://t.pia.jp/pia/ticketInformation.do?eventCd=2545086&rlsCd=001";
 const LINE_TOKEN = "53HSL37fngc+EuTIdX2tBlWHdwb4evtfo1ZRLb1XK1uETtS9FeBOLqHVCUQvO7YVssWAI/W1NfQ8yUPVIuQFY7425HbkBwzLmj2Ljt7zT0xcNhKgcNj/P5C631nktl1O44WQb2m+JLWQ/lF+CYUdxQdB04t89/1O/w1cDnyilFU=";
 const LINE_USER_ID = "C755fb6ffbd64b76818fd0a4dac5b130f";
 
@@ -40,10 +38,6 @@ let retrying = false;
 // 各ボタンの前回の状態。key = 公演日-公演時間-詳細リンク → true=primary, false=default
 // default→primary になったときだけ通知し、primary→default になったら false に戻す（再販でまた通知できる）
 let lastButtonState = new Map();
-
-// PIA: key = 公演日-曜日-公演時間 → true=空きあり(few or closeなし), false=close
-let lastPiaState = new Map();
-let retryingPia = false;
 
 function isBattleTime() {
   const now = new Date();
@@ -110,67 +104,6 @@ function parseAllBlocks(html) {
   }
 
   return items;
-}
-
-/**
- * PIA ページの dataList ブロックを解析する。
- * ticketSelect__icon--close → ticketSelect__icon--few または close が無くなったら「空きあり」とする。
- * 戻り: { 公演日, 曜日, 公演時間, isAvailable }[]
- */
-function parsePiaBlocks(html) {
-  const items = [];
-  const titleRe = /class="[^"]*dataList__title[^"]*"[^>]*>([\s\S]*?)<\/\w+>/g;
-  const dayRe = /class="[^"]*Y15-date-hol[^"]*"[^>]*>([\s\S]*?)<\/\w+>/g;
-  const detailRe = /class="[^"]*dataList__detail[^"]*"[^>]*>([\s\S]*?)<\/\w+>/g;
-
-  const blockStarts = [];
-  let m;
-  while ((m = titleRe.exec(html)) !== null) {
-    blockStarts.push({ index: m.index, dateText: m[1].replace(/\s+/g, " ").trim() });
-  }
-
-  const MIN_BLOCK_LEN = 2000;
-  for (let i = 0; i < blockStarts.length; i++) {
-    const blockStart = blockStarts[i].index;
-    const nextStart = i + 1 < blockStarts.length ? blockStarts[i + 1].index : html.length;
-    const blockEnd = Math.max(nextStart, blockStart + MIN_BLOCK_LEN);
-    const block = html.slice(blockStart, Math.min(blockEnd, html.length));
-
-    const hasClose = block.includes("ticketSelect__icon--close");
-    const hasFew = block.includes("ticketSelect__icon--few");
-    const isAvailable = hasFew || !hasClose;
-
-    const 公演日 = blockStarts[i].dateText;
-    dayRe.lastIndex = 0;
-    const dayMatch = dayRe.exec(block);
-    const 曜日 = dayMatch ? dayMatch[1].replace(/\s+/g, " ").trim() : "";
-    detailRe.lastIndex = 0;
-    const detailMatch = detailRe.exec(block);
-    const 公演時間 = detailMatch ? detailMatch[1].replace(/\s+/g, " ").trim() : "";
-
-    items.push({
-      公演日,
-      曜日,
-      公演時間,
-      isAvailable,
-    });
-  }
-
-  return items;
-}
-
-function buildPiaNotificationMessage(item, pageUrl) {
-  const lines = [
-    "[toall]\n🎫 PIAでチケットに空きが出ました",
-    "",
-    `公演日：${item.公演日}`,
-    item.曜日 ? `曜日：${item.曜日}` : "",
-    item.公演時間 ? `開演：${item.公演時間}` : "",
-  ].filter(Boolean);
-  lines.push("");
-  lines.push("ページURL");
-  lines.push(pageUrl);
-  return lines.join("\n");
 }
 
 function buildNotificationMessage(item, pageUrl) {
@@ -315,91 +248,6 @@ async function checkPage() {
   }
 }
 
-async function checkPiaPage() {
-  try {
-    let res;
-    for (let attempt = 0; attempt < FIVE_XX_RETRY_COUNT; attempt++) {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), TIMEOUT);
-
-      res = await fetch(PIA_URL, {
-        signal: controller.signal,
-        headers: {
-          "User-Agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        },
-      });
-
-      clearTimeout(timeout);
-
-      if (res.ok) break;
-
-      if (res.status >= 500 && attempt < FIVE_XX_RETRY_COUNT - 1) {
-        console.log("[PIA] 5xx:", res.status, "→ リトライ");
-        await sleep(FIVE_XX_RETRY_WAIT_MS);
-        continue;
-      }
-
-      if (!res.ok) {
-        if (res.status >= 500) return;
-        throw new Error("Fetch status error");
-      }
-    }
-
-    const html = await res.text();
-    const allBlocks = parsePiaBlocks(html);
-
-    for (const block of allBlocks) {
-      const key = `${block.公演日}-${block.曜日}-${block.公演時間}`;
-      const wasAvailable = lastPiaState.get(key);
-
-      if (block.isAvailable && wasAvailable !== true) {
-        if (LINE_TOKEN && LINE_USER_ID) {
-          const message = buildPiaNotificationMessage(block, PIA_URL);
-
-          const lineRes = await fetch("https://api.line.me/v2/bot/message/push", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${LINE_TOKEN}`,
-            },
-            body: JSON.stringify({
-              to: LINE_USER_ID,
-              messages: [{ type: "text", text: message }],
-            }),
-          });
-
-          if (lineRes.ok) {
-            console.log("[PIA] LINE通知送信:", block.公演日, block.公演時間);
-          } else {
-            const errBody = await lineRes.text();
-            console.error("[PIA] LINE API エラー:", lineRes.status, errBody);
-          }
-          await sendChatworkMessage(message);
-        }
-      }
-
-      lastPiaState.set(key, block.isAvailable);
-    }
-
-    for (const key of lastPiaState.keys()) {
-      const found = allBlocks.some(
-        (b) => `${b.公演日}-${b.曜日}-${b.公演時間}` === key
-      );
-      if (!found) lastPiaState.delete(key);
-    }
-
-    console.log("[PIA] Checked at:", new Date().toISOString());
-    retryingPia = false;
-  } catch (err) {
-    console.log("[PIA] Fetch timeout or error");
-    if (!retryingPia) {
-      retryingPia = true;
-      setTimeout(checkPiaPage, RETRY_DELAY);
-    }
-  }
-}
-
 function scheduleNextCheck() {
   const interval = isBattleTime() ? BATTLE_INTERVAL : NORMAL_INTERVAL;
 
@@ -409,13 +257,4 @@ function scheduleNextCheck() {
   }, interval);
 }
 
-function scheduleNextPiaCheck() {
-  const interval = isBattleTime() ? BATTLE_INTERVAL : NORMAL_INTERVAL;
-  setTimeout(async () => {
-    await checkPiaPage().catch(() => {});
-    scheduleNextPiaCheck();
-  }, interval);
-}
-
 scheduleNextCheck();
-scheduleNextPiaCheck();
