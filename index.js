@@ -175,7 +175,7 @@ function buildPiaNotificationMessage(item, pageUrl) {
 
 function buildNotificationMessage(item, pageUrl) {
   const lines = [
-    "[toall]\n🎉 チケット戻ったよ！🎾",
+    "🎉 チケット戻ったよ！🎾",
     "",
     `公演日：${item.公演日}`,
     `${item.公演時間 || "—"}`,
