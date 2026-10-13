@@ -1,15 +1,20 @@
 /**
- * チケット一覧監視（e+）
- * - e+: button--default → button--primary の変化で LINE / Chatwork に通知
+ * チケット監視（ローチケ）
+ * ページ内 JSON の dispSeatInfo を見る。
+ * 9（event-soldout）が 1（event-few）または 0（event-seatsLeft）に変わった公演だけ
+ * LINE / Chatwork に通知する。
  */
 import fetch from "node-fetch";
 import express from "express";
 
-const EPLUS_URL = "https://eplus.jp/sf/detail/0473460001";
+const LTIKE_URL = "https://l-tike.com/order/?gLcode=35568";
+
+const SOLDOUT = "9";
+const AVAILABLE = new Set(["1", "0"]);
+
 const LINE_TOKEN = "53HSL37fngc+EuTIdX2tBlWHdwb4evtfo1ZRLb1XK1uETtS9FeBOLqHVCUQvO7YVssWAI/W1NfQ8yUPVIuQFY7425HbkBwzLmj2Ljt7zT0xcNhKgcNj/P5C631nktl1O44WQb2m+JLWQ/lF+CYUdxQdB04t89/1O/w1cDnyilFU=";
 const LINE_USER_ID = "C755fb6ffbd64b76818fd0a4dac5b130f";
 
-// Chatwork（TOKEN と ROOM_ID が設定されている場合のみ送信）
 const _cwRoomRaw = (process.env.CHATWORK_ROOM_ID || "rid425512899").trim();
 const CHATWORK_TOKEN = (process.env.CHATWORK_TOKEN || "70e88dacd51fa5ed6d319dea68286761").trim();
 const CHATWORK_ROOM_ID = _cwRoomRaw.match(/rid(\d+)/)?.[1] || _cwRoomRaw.replace(/\D/g, "") || "";
@@ -18,13 +23,13 @@ const NORMAL_INTERVAL = 30000;
 const BATTLE_INTERVAL = 15000;
 const RETRY_DELAY = 5000;
 const TIMEOUT = 15000;
-const FIVE_XX_RETRY_COUNT = 3;   // 5xx 時の同一チェック内リトライ回数
-const FIVE_XX_RETRY_WAIT_MS = 15000; // 5xx リトライまでの待機（ミリ秒）
+const FIVE_XX_RETRY_COUNT = 3;
+const FIVE_XX_RETRY_WAIT_MS = 15000;
 
 const app = express();
 app.use(express.json());
-const PORT = process.env.PORT || 10000;
-app.get("/", (req, res) => res.send("Watcher running"));
+const PORT = process.env.PORT || 10001;
+app.get("/", (req, res) => res.send("Lawson ticket watcher running"));
 app.post("/webhook", (req, res) => {
   console.log("Webhook受信:");
   console.log(JSON.stringify(req.body, null, 2));
@@ -33,11 +38,12 @@ app.post("/webhook", (req, res) => {
 app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
 
 console.log("Watcher started:", new Date().toISOString());
+console.log("Target:", LTIKE_URL);
+console.log("通知条件: dispSeatInfo 9 → 1 または 0");
 
 let retrying = false;
-// 各ボタンの前回の状態。key = 公演日-公演時間-詳細リンク → true=primary, false=default
-// default→primary になったときだけ通知し、primary→default になったら false に戻す（再販でまた通知できる）
-let lastButtonState = new Map();
+// key = 公演日-開演時刻。値は直前の dispSeatInfo
+let lastStatus = new Map();
 
 function isBattleTime() {
   const now = new Date();
@@ -50,82 +56,43 @@ function isBattleTime() {
   return false;
 }
 
-/**
- * ページ内の全ボタン（primary も default も）をブロック単位で取得する。
- * 戻り: { 公演日, 公演時間, 詳細リンク, isPrimary }[]
- */
-function parseAllBlocks(html) {
-  const items = [];
-  const detailLinkRe = /window\.location\.href='([^']+)'/g;
+function parseShows(html) {
+  const match = html.match(/<script type="application\/json" id="form-data">\s*([\s\S]*?)\s*<\/script>/);
+  if (!match) throw new Error("form-data がありません");
+  const data = JSON.parse(match[1]);
+  const list = data.pfInfoListBean?.pfInfoDetailListBeanList || [];
+  const shows = [];
 
-  const dateClassRe = /class="[^"]*block-ticket-article__date[^"]*"[^>]*>([\s\S]*?)<\/\w+>/g;
-  const timeClassRe = /class="[^"]*block-ticket-article__time[^"]*"[^>]*>([\s\S]*?)<\/\w+>/g;
-
-  const blockStarts = [];
-  let dm;
-  while ((dm = dateClassRe.exec(html)) !== null) {
-    blockStarts.push({ index: dm.index, dateText: dm[1].replace(/\s+/g, " ").trim() });
-  }
-
-  const MIN_BLOCK_LEN = 3000;
-  for (let i = 0; i < blockStarts.length; i++) {
-    const blockStart = blockStarts[i].index;
-    const nextStart = i + 1 < blockStarts.length ? blockStarts[i + 1].index : html.length;
-    const blockEnd = Math.max(nextStart, blockStart + MIN_BLOCK_LEN);
-    const block = html.slice(blockStart, Math.min(blockEnd, html.length));
-
-    const hasPrimary = block.includes("button--primary");
-    const hasDefault = block.includes("button--default");
-    if (!hasPrimary && !hasDefault) continue;
-
-    const 公演日 = blockStarts[i].dateText;
-    timeClassRe.lastIndex = 0;
-    const timeMatch = timeClassRe.exec(block);
-    const 公演時間Raw = timeMatch ? timeMatch[1] : "";
-    const 公演時間 = 公演時間Raw.replace(/\s+/g, " ").trim();
-
-    const links = [];
-    const seenUrls = new Set();
-    let linkMatch;
-    detailLinkRe.lastIndex = 0;
-    while ((linkMatch = detailLinkRe.exec(block)) !== null) {
-      const href = linkMatch[1].replace(/&amp;/g, "&").trim();
-      if (seenUrls.has(href)) continue;
-      seenUrls.add(href);
-      links.push(href);
+  for (const performance of list) {
+    for (const detail of performance.pfInfoDetailList || []) {
+      const date = performance.pfDate || "";
+      const time = detail.curtainTime || "";
+      if (!date || !time) continue;
+      shows.push({
+        key: `${date}-${time}`,
+        date,
+        time,
+        status: String(detail.dispSeatInfo ?? ""),
+      });
     }
-
-    items.push({
-      公演日,
-      公演時間,
-      詳細リンク: links,
-      isPrimary: hasPrimary,
-    });
   }
 
-  return items;
+  return shows;
 }
 
-function buildNotificationMessage(item, pageUrl) {
-  const lines = [
-    "[toall]🎉 チケット戻ったよ！🎾",
+function buildNotificationMessage(show) {
+  return [
+    "[toall]🎉 チケット戻ったよ！",
     "",
-    `公演日：${item.公演日}`,
-    `${item.公演時間 || "—"}`,
-  ];
-
-  for (const link of item.詳細リンク) {
-    lines.push(link);
-  }
-
-  lines.push("");
-  lines.push(`ページURL`);
-  lines.push(pageUrl);
-
-  return lines.join("\n");
+    `公演日：${show.date}`,
+    show.time,
+    `在庫コード：9 → ${show.status}`,
+    "",
+    "ページURL",
+    LTIKE_URL,
+  ].join("\n");
 }
 
-/** Chatwork にメッセージを送信（TOKEN と ROOM_ID が設定されている場合のみ） */
 async function sendChatworkMessage(text) {
   if (!CHATWORK_TOKEN || !CHATWORK_ROOM_ID) return;
   const roomId = String(CHATWORK_ROOM_ID).trim();
@@ -148,6 +115,28 @@ async function sendChatworkMessage(text) {
   }
 }
 
+async function sendLineMessage(text) {
+  if (!LINE_TOKEN || !LINE_USER_ID) return;
+  const lineRes = await fetch("https://api.line.me/v2/bot/message/push", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${LINE_TOKEN}`,
+    },
+    body: JSON.stringify({
+      to: LINE_USER_ID,
+      messages: [{ type: "text", text }],
+    }),
+  });
+
+  if (lineRes.ok) {
+    console.log("LINE通知送信 OK");
+  } else {
+    const errBody = await lineRes.text();
+    console.error("LINE API エラー:", lineRes.status, errBody);
+  }
+}
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function checkPage() {
@@ -157,11 +146,11 @@ async function checkPage() {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), TIMEOUT);
 
-      res = await fetch(EPLUS_URL, {
+      res = await fetch(LTIKE_URL, {
         signal: controller.signal,
         headers: {
-          "User-Agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+          "Accept-Language": "ja",
         },
       });
 
@@ -185,60 +174,33 @@ async function checkPage() {
       }
     }
 
-    const html = await res.text();
-    const allBlocks = parseAllBlocks(html);
+    const shows = parseShows(await res.text());
+    const counts = { 9: 0, 1: 0, 0: 0 };
 
-    for (const block of allBlocks) {
-      const link = block.詳細リンク.length ? block.詳細リンク[0].replace(/&amp;/g, "&").trim() : "";
-      const key = `${block.公演日}-${block.公演時間}-${link}`;
-      const wasPrimary = lastButtonState.get(key);
-
-      // default → primary になったときだけ通知（初回も wasPrimary が undefined なので通知）
-      if (block.isPrimary && wasPrimary !== true) {
-        if (LINE_TOKEN && LINE_USER_ID) {
-          const message = buildNotificationMessage(
-            { 公演日: block.公演日, 公演時間: block.公演時間, 詳細リンク: block.詳細リンク },
-            EPLUS_URL
-          );
-
-          const lineRes = await fetch("https://api.line.me/v2/bot/message/push", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${LINE_TOKEN}`,
-            },
-            body: JSON.stringify({
-              to: LINE_USER_ID,
-              messages: [{ type: "text", text: message }],
-            }),
-          });
-
-          if (lineRes.ok) {
-            console.log("LINE通知送信:", block.公演日, block.公演時間);
-          } else {
-            const errBody = await lineRes.text();
-            console.error("LINE API エラー:", lineRes.status, errBody);
-          }
-          await sendChatworkMessage(message);
-        }
+    for (const show of shows) {
+      if (show.status === "9" || show.status === "1" || show.status === "0") {
+        counts[show.status] += 1;
       }
-
-      lastButtonState.set(key, block.isPrimary);
+      const prev = lastStatus.get(show.key);
+      if (prev === SOLDOUT && AVAILABLE.has(show.status)) {
+        const message = buildNotificationMessage(show);
+        await sendLineMessage(message);
+        await sendChatworkMessage(message);
+        console.log("通知対象:", show.date, show.time, `9 → ${show.status}`);
+      }
+      lastStatus.set(show.key, show.status);
     }
 
-    // 今回のページに無い key は削除（公演が一覧から消えた場合）
-    for (const key of lastButtonState.keys()) {
-      const found = allBlocks.some((b) => {
-        const l = b.詳細リンク.length ? b.詳細リンク[0].replace(/&amp;/g, "&").trim() : "";
-        return `${b.公演日}-${b.公演時間}-${l}` === key;
-      });
-      if (!found) lastButtonState.delete(key);
-    }
-
-    console.log("[e+] Checked at:", new Date().toISOString());
+    console.log(
+      "[ローチケ] Checked at:",
+      new Date().toISOString(),
+      `9:${counts[9]}`,
+      `1:${counts[1]}`,
+      `0:${counts[0]}`
+    );
     retrying = false;
   } catch (err) {
-    console.log("[e+] Fetch timeout or error");
+    console.log("[ローチケ] Fetch timeout or error:", err.message);
 
     if (!retrying) {
       retrying = true;
@@ -257,4 +219,5 @@ function scheduleNextCheck() {
   }, interval);
 }
 
+checkPage().catch(() => {});
 scheduleNextCheck();
